@@ -131,19 +131,32 @@ class NavCMTAgent:
 
         # Models
 
-        self.tokenizer = BertTokenizerFast.from_pretrained('/cver/xcding/code/tokenizer_files/bert-base-uncase')
+        self.tokenizer = BertTokenizerFast.from_pretrained('/mnt/HDD/data/YST/HETT/HETT/datasets/hf_models/bert-base-uncased/')
         self.lang_model = CustomBERTModel().cuda()
 
         # self.img_tensor = transforms.ToTensor()
 
         self.vision_model = Darknet(self.args.darknet_model_file, 224).cuda()
 
-        new_state = torch.load(self.args.darknet_weight_file)
-        state = self.vision_model.state_dict()
-        model_keys = set(state.keys())
-        state_dict = {k: v for k, v in new_state['model'].items() if k in model_keys}
-        state.update(state_dict)
-        self.vision_model.load_state_dict(state)
+        try:
+            print(f"Loading darknet weights from {self.args.darknet_weight_file}")
+            new_state = torch.load(self.args.darknet_weight_file, map_location='cuda')
+            
+            # 兼容字典格式和直接保存权重的格式
+            if isinstance(new_state, dict) and 'model' in new_state:
+                weights = new_state['model']
+            else:
+                weights = new_state
+                
+            state = self.vision_model.state_dict()
+            # 严格过滤，只有形状匹配的参数才会被加载
+            state_dict = {k: v for k, v in weights.items() if k in state and state[k].shape == v.shape}
+            state.update(state_dict)
+            self.vision_model.load_state_dict(state)
+            print("Vision model initialized with Darknet weights.")
+        except Exception as e:
+            print(f"Warning: Failed to load vision_model weights: {e}")
+            print("Proceeding with randomly initialized weights or will be overwritten by checkpoint.")
 
 
 
@@ -412,6 +425,7 @@ class NavCMTAgent:
             'directions': torch.zeros((batch_size, 0, 4)).cuda(),
             'grid_fts': torch.zeros(batch_size, 0, 768).cuda(),
             'grid_index': torch.zeros(batch_size, 0).cuda(),
+            'time_steps': torch.zeros(batch_size, 0).cuda(), # 新增：记录特征的时间戳
             'frames': torch.zeros(batch_size, 0, 512, 49).cuda(),
             'lenths': [0 for _ in range(batch_size)],
             'lang': lang_features,
@@ -474,24 +488,36 @@ class NavCMTAgent:
 
 
 
-            pred_direction, pred_progress, pred_goals, pred_logits, grid_ft = self.vln_model(
+            pred_direction, pred_progress, pred_goals, pred_logits, grid_ft, compression_stats = self.vln_model(
                 directions=input['directions'],
                 frames=input['frames'],
                 lenths=input['lenths'],
                 grid_fts=input['grid_fts'],
                 grid_index=input['grid_index'],
+                # `cur_grid` from env.py uses the same flattened indexing as historical `grid_index`:
+                # row_id * grid_size + col_id. ET uses this shared convention for near/far splitting.
+                current_grid=torch.tensor(np.array([ob['cur_grid'] for ob in obs]), dtype=torch.long).cuda(),
                 maps=input['maps'],
                 lang=input['lang'],
                 candidates=input['candidates'],
                 centroids=input['centroids'],
-                lang_cls=input['lang_cls']
+                lang_cls=input['lang_cls'],
+                current_t=t,                      # 【新增】告诉模型现在是第几步
+                time_steps=input['time_steps']    # 【新增】告诉模型过去特征的时间标签
             )
+            for key, value in compression_stats.items():
+                self.logs[key].append(value)
 
             input['grid_fts'] = torch.cat((input['grid_fts'], grid_ft), dim=1)
             grid_index = torch.tensor(np.array([ob['cur_grid'] for ob in obs])).unsqueeze(1).cuda()
             # print(input['grid_index'], grid_index)
 
             input['grid_index'] = torch.cat((input['grid_index'], grid_index), dim=1)
+            # 【新增】特征追加完，时间标签也同步追加。
+            # 生成一个形状为 (batch_size, 1)，值为当前时间 t 的张量
+            current_time_step = torch.full((batch_size, 1), t, dtype=torch.float32).cuda()
+            # 把它拼接到 input['time_steps'] 的后面，保证特征数量和时间标签数量永远对齐
+            input['time_steps'] = torch.cat((input['time_steps'], current_time_step), dim=1)
             # print("- model prediction takes %s seconds ---" % (time.time() - rollingout_action_start_time))
             # pred_direction = output
             # pred_progress = progress
@@ -777,7 +803,7 @@ class NavCMTAgent:
                 print("NOTICE: DIFFERENT KEYS IN THE ", name)
                 # if not list(model_keys)[0].startswith('module.') and list(load_keys)[0].startswith('module.'):
                 #     state_dict = {k.replace('module.', ''): v for k, v in state_dict.items()}
-                state_dict = {k: v for k, v in states[name]['state_dict'].items() if k in model_keys}
+                state_dict = {k: v for k, v in states[name]['state_dict'].items() if k in model_keys and v.shape == state[k].shape}
             state.update(state_dict)
             model.load_state_dict(state)
             if self.args.resume_optimizer:

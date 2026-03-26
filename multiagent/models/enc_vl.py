@@ -106,6 +106,7 @@ class EncoderVL(nn.Module):
             emb_directions,
             emb_maps,
             emb_positions,
+            spatial_padding_mask=None,
             # lengths
     ):
         """
@@ -117,6 +118,10 @@ class EncoderVL(nn.Module):
         # create a mask for padded elements
         length_mask_pad = length_lang + 3 + length_max
         mask_pad = torch.zeros((len(emb_lang), length_mask_pad), device=emb_lang.device).bool()
+        if spatial_padding_mask is not None:
+            # Only padded spatial slots are masked. Real compressed tokens remain visible, so
+            # the transformer effectively attends to fewer spatial tokens than the full grid.
+            mask_pad[:, length_lang + 3:] = spatial_padding_mask.bool()
         # for i, l in enumerate(lengths):
         #     # mask padded frames
         #     mask_pad[i, (length_lang + l):(length_lang + length_max)] = True

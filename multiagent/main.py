@@ -1,3 +1,7 @@
+import torch
+torch.backends.cudnn.enabled = False
+##关闭 CuDNN 加速器
+
 import os
 import json
 import time
@@ -23,6 +27,22 @@ from parser import parse_args
 
 from torch.utils.data.distributed import DistributedSampler
 from torch.utils.data.dataloader import DataLoader
+
+
+def format_compression_logs(logs):
+    keys = [
+        'tokens_before',
+        'tokens_after',
+        'near_tokens',
+        'far_summary_tokens',
+        'pruned_tokens',
+        'merged_away_tokens',
+    ]
+    values = []
+    for key in keys:
+        mean_value = sum(logs[key]) / max(len(logs[key]), 1)
+        values.append((key, mean_value))
+    return "compression " + " ".join(f"{key} {value:.4f}" for key, value in values)
 
 
 def get_tokenizer(args):
@@ -222,6 +242,7 @@ def train(args, train_env, val_envs, rank=-1):
                     stage1_step, stage2_step, stage2_rotate),
                 record_file
             )
+            write_to_record_file("\n%s" % format_compression_logs(agent.logs), record_file)
 
             # Run validation
             loss_str = "\nepoch {}".format(idx)
@@ -250,6 +271,7 @@ def train(args, train_env, val_envs, rank=-1):
                         stage1_step, stage2_step, stage2_rotate),
                     record_file
                 )
+                write_to_record_file("\n%s" % format_compression_logs(agent_eval.logs), record_file)
                 loss_str += "\n%s " % env_name
                 for metric, val in score_summary.items():
                     loss_str += ', %s: %.2f' % (metric, val)
@@ -305,6 +327,7 @@ def valid(args, val_envs, rank=-1):
                     stage1_step, stage2_step, stage2_rotate),
                 record_file
             )
+            write_to_record_file("\n%s" % format_compression_logs(agent_eval.logs), record_file)
             loss_str += "\n%s " % env_name
             for metric, val in score_summary.items():
                 loss_str += ', %s: %.2f' % (metric, val)

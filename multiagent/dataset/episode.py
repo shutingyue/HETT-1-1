@@ -1,7 +1,7 @@
 from dataclasses import dataclass
 
-from direction.cityreferobject import CityReferObject
-from direction.space import Pose4D
+from cityreferobject import CityReferObject
+from space import Pose4D
 import numpy as np
 
 from typing import List, Dict, Tuple

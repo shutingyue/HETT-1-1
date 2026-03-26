@@ -92,6 +92,9 @@ def parse_args():
 
     # model
     parser.add_argument('--grid_size', type=int, default=7)
+    parser.add_argument('--spatial_compression', action='store_true', default=False)
+    parser.add_argument('--spatial_dist_threshold', type=int, default=1)
+    parser.add_argument('--spatial_far_coarse_size', type=int, default=2)
     parser.add_argument('--demb', type=int, default=768)
     parser.add_argument('--encoder_heads', type=int, default=12)
     parser.add_argument('--encoder_layers', type=int, default=2)
