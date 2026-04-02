@@ -22,7 +22,7 @@ flag="--world_size ${ngpus} \
       --train_trajectory_type mturk \
       --log_every 1 \
       --eval_every 1 \
-      --epochs 50 \
+      --epochs 25 \
       --save_every 1 \
       --log_dir log \
       --move_iteration 10 \
