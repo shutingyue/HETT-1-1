@@ -140,6 +140,7 @@ class CityNavBatch(torch.utils.data.IterableDataset):
         self.batch_size = batch_size
         self.rank = rank
         self.world_size = world_size
+        self._gp_eval_debug_count = 0
 
     def size(self):
         return len(self.data)
@@ -430,6 +431,29 @@ class CityNavBatch(torch.utils.data.IterableDataset):
                     metrics['stage2_oracle_ne'].append(v)
 
             metrics['instr_id'].append(instr_id)
+
+        gp_success_count = len(metrics['gp_success'])
+        oracle_gp_success_count = len(metrics['oracle_gp_success'])
+        gp_denominator_zero = gp_success_count == 0
+        oracle_gp_denominator_zero = oracle_gp_success_count == 0
+        if self._gp_eval_debug_count < 3 and self.split != 'train_seen':
+            print(
+                '[EvalDebug][gp_sr] split={} gp_success_count={} oracle_gp_success_count={} '
+                'gp_source_empty={} oracle_gp_source_empty={} gp_denominator_zero={} '
+                'oracle_gp_denominator_zero={}'.format(
+                    self.split,
+                    gp_success_count,
+                    oracle_gp_success_count,
+                    gp_denominator_zero,
+                    oracle_gp_denominator_zero,
+                    gp_denominator_zero,
+                    oracle_gp_denominator_zero,
+                )
+            )
+            self._gp_eval_debug_count += 1
+
+        gp_sr = np.mean(metrics['gp_success']) * 100 if gp_success_count > 0 else 0.0
+        oracle_gp_sr = np.mean(metrics['oracle_gp_success']) * 100 if oracle_gp_success_count > 0 else 0.0
         avg_metrics = {
             # 'steps': np.mean(metrics['trajectory_steps']),
             'lengths': np.mean(metrics['trajectory_lengths']),
@@ -449,8 +473,8 @@ class CityNavBatch(torch.utils.data.IterableDataset):
             'stage2_ne': np.mean(metrics['stage2_ne']),
             'stage2_oracle_ne': np.mean(metrics['stage2_oracle_ne']),
             'gt_length': np.mean(metrics['gt_length']),
-            'gp_sr': np.mean(metrics['gp_success']) * 100,
-            'oracle_gp_sr': np.mean(metrics['oracle_gp_success']) * 100
+            'gp_sr': gp_sr,
+            'oracle_gp_sr': oracle_gp_sr
             # 'oracle_goal_sr': np.mean(metrics['oracle_goal_success']),
             # 'goal_sr': np.mean(metrics['goal_success'])
             # 'oracle_pred_sr': np.mean(item['oracle_success']) * 100,

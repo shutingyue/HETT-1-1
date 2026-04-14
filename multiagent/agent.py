@@ -230,6 +230,10 @@ class NavCMTAgent:
         # Logs
         sys.stdout.flush()
         self.logs = defaultdict(list)
+        self.topo_eval_debug_batches = 0
+        self.topo_eval_stage_batches = 0
+        self.topo_eval_debug_limit = 5
+        self.topo_history_debug_batches = 0
 
     def get_results(self):
 
@@ -247,6 +251,12 @@ class NavCMTAgent:
         self.losses = []
         self.results = {}
         self.loss = 0
+        self.topo_eval_debug_batches = 0
+        self.topo_eval_stage_batches = 0
+        self.topo_history_debug_batches = 0
+        if self.args.use_topo_memory:
+            self.vln_model_without_ddp.topo_eval_debug_batches = 0
+            self.vln_model_without_ddp.topo_memory_builder._eval_debug_batches = 0
         idx = 0
         start = time.time()
         for l in loader:
@@ -273,6 +283,12 @@ class NavCMTAgent:
         self.losses = []
         self.results = {}
         self.loss = 0
+        self.topo_eval_debug_batches = 0
+        self.topo_eval_stage_batches = 0
+        self.topo_history_debug_batches = 0
+        if self.args.use_topo_memory:
+            self.vln_model_without_ddp.topo_eval_debug_batches = 0
+            self.vln_model_without_ddp.topo_memory_builder._eval_debug_batches = 0
         idx = 0
         start = time.time()
         for l in loader:
@@ -425,6 +441,7 @@ class NavCMTAgent:
             'directions': torch.zeros((batch_size, 0, 4)).cuda(),
             'grid_fts': torch.zeros(batch_size, 0, 768).cuda(),
             'grid_index': torch.zeros(batch_size, 0).cuda(),
+            'topo_xy': torch.zeros(batch_size, 0, 2).cuda(),
             'time_steps': torch.zeros(batch_size, 0).cuda(), # 新增：记录特征的时间戳
             'frames': torch.zeros(batch_size, 0, 512, 49).cuda(),
             'lenths': [0 for _ in range(batch_size)],
@@ -494,6 +511,7 @@ class NavCMTAgent:
                 lenths=input['lenths'],
                 grid_fts=input['grid_fts'],
                 grid_index=input['grid_index'],
+                topo_xy=input['topo_xy'],
                 # `cur_grid` from env.py uses the same flattened indexing as historical `grid_index`:
                 # row_id * grid_size + col_id. ET uses this shared convention for near/far splitting.
                 current_grid=torch.tensor(np.array([ob['cur_grid'] for ob in obs]), dtype=torch.long).cuda(),
@@ -508,16 +526,69 @@ class NavCMTAgent:
             for key, value in compression_stats.items():
                 self.logs[key].append(value)
 
+            if (
+                train_ml is None
+                and self.args.use_topo_memory
+                and self.default_gpu
+                and t == 0
+                and self.topo_eval_debug_batches < self.topo_eval_debug_limit
+            ):
+                topo_debug = getattr(self.vln_model_without_ddp, 'topo_debug_cache', None)
+                if topo_debug is not None:
+                    print(
+                        '[TopoEvalDebug] batch={} pred_goals[min={:.4f}, max={:.4f}, mean={:.4f}] '
+                        'valid_topo_nodes={:.2f} max_cell_to_token={:.2f} target_logits_token_shape={} '
+                        'cell_to_token_map[min={}, max={}] anchor_idx={} nodes_after_merge={:.2f} '
+                        'created_nodes={:.2f} updated_nodes={:.2f}'.format(
+                            self.topo_eval_debug_batches,
+                            topo_debug['pred_goals_min'],
+                            topo_debug['pred_goals_max'],
+                            topo_debug['pred_goals_mean'],
+                            topo_debug['valid_topo_nodes'],
+                            topo_debug['max_cell_to_token'],
+                            topo_debug['target_logits_token_shape'],
+                            topo_debug['cell_to_token_map_min'],
+                            topo_debug['cell_to_token_map_max'],
+                            topo_debug['anchor_idx'],
+                            topo_debug['nodes_after_merge'],
+                            topo_debug['created_nodes'],
+                            topo_debug['updated_nodes'],
+                        )
+                    )
+                    self.topo_eval_debug_batches += 1
+
             input['grid_fts'] = torch.cat((input['grid_fts'], grid_ft), dim=1)
             grid_index = torch.tensor(np.array([ob['cur_grid'] for ob in obs])).unsqueeze(1).cuda()
+            topo_xy = current_pos.view(-1, 1, 2)
             # print(input['grid_index'], grid_index)
 
             input['grid_index'] = torch.cat((input['grid_index'], grid_index), dim=1)
+            input['topo_xy'] = torch.cat((input['topo_xy'], topo_xy), dim=1)
             # 【新增】特征追加完，时间标签也同步追加。
             # 生成一个形状为 (batch_size, 1)，值为当前时间 t 的张量
             current_time_step = torch.full((batch_size, 1), t, dtype=torch.float32).cuda()
             # 把它拼接到 input['time_steps'] 的后面，保证特征数量和时间标签数量永远对齐
             input['time_steps'] = torch.cat((input['time_steps'], current_time_step), dim=1)
+            if (
+                train_ml is None
+                and self.args.use_topo_memory
+                and self.default_gpu
+                and self.topo_history_debug_batches < 3
+                and t < 8
+            ):
+                current_pose_debug = np.array([ob['position'] for ob in obs], dtype=np.float32)
+                print(
+                    '[TopoHistoryWrite] batch={} rollout_step={} current_pose={} current_grid={} '
+                    'written_cell_id={} written_xy={} history_len={}'.format(
+                        self.topo_history_debug_batches,
+                        t,
+                        current_pose_debug.tolist(),
+                        np.array([ob['cur_grid'] for ob in obs], dtype=np.int64).tolist(),
+                        grid_index.squeeze(1).detach().cpu().tolist(),
+                        topo_xy.squeeze(1).detach().cpu().tolist(),
+                        int(input['grid_index'].shape[1]),
+                    )
+                )
             # print("- model prediction takes %s seconds ---" % (time.time() - rollingout_action_start_time))
             # pred_direction = output
             # pred_progress = progress
@@ -695,9 +766,11 @@ class NavCMTAgent:
                 if not ended[i]:
                     traj[i]['trajectory'].append(poses[i])
                     # Update the status
+            obs = self.env._get_obs(poses, random_direction=(self.feedback == 'teacher'))  # get gt_obs
+            current_directions = [np.array(ob['pose'].yaw, dtype=np.float32) for ob in obs]
+            current_positions = [np.array(ob['position'], dtype=np.float32) for ob in obs]
             direction_t = torch.from_numpy(np.array(current_directions, dtype=np.float32))
             position_t = torch.from_numpy(np.array(current_positions, dtype=np.float32))
-            obs = self.env._get_obs(poses, random_direction=(self.feedback == 'teacher'))  # get gt_obs
             # current_view_corners = [np.array(ob['gt_path_corners'][0]) for ob in obs]
 
             # Early exit if all ended
@@ -749,6 +822,29 @@ class NavCMTAgent:
         self.logs['stage1_step'].append(float(stage1_step) / batch_size)
         self.logs['stage2_step'].append(float(stage2_step) / batch_size)
         self.logs['stage2_rotate'].append(float(stage2_rotate) / batch_size)
+
+        if (
+            train_ml is None
+            and self.args.use_topo_memory
+            and self.default_gpu
+            and self.topo_eval_stage_batches < self.topo_eval_debug_limit
+        ):
+            stage2_total = stage2_step + stage2_rotate
+            stage2_ratio = float(stage2_total) / max(float(stage1_step + stage2_total), 1.0)
+            print(
+                '[TopoEvalStage] batch={} stage1_step={} stage2_step={} stage2_rotate={} stage2_total={} stage2_ratio={:.4f}{}'.format(
+                    self.topo_eval_stage_batches,
+                    stage1_step,
+                    stage2_step,
+                    stage2_rotate,
+                    stage2_total,
+                    stage2_ratio,
+                    ' stage2_is_rare=yes' if stage2_ratio < 0.1 else ''
+                )
+            )
+            self.topo_eval_stage_batches += 1
+        if train_ml is None and self.args.use_topo_memory and self.topo_history_debug_batches < 3:
+            self.topo_history_debug_batches += 1
 
         # print('[3]')
         # debug_memory()

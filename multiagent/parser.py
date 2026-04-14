@@ -81,6 +81,7 @@ from dataclasses import dataclass, asdict
 def parse_args():
 
     parser = argparse.ArgumentParser()
+    bool_optional_action = getattr(argparse, 'BooleanOptionalAction', None)
 
     parser.add_argument('--seed', type=int, default=0)
     parser.add_argument('--mode', type=str, choices=['train', 'eval', 'visualize'], default='train')
@@ -95,6 +96,38 @@ def parse_args():
     parser.add_argument('--spatial_compression', action='store_true', default=False)
     parser.add_argument('--spatial_dist_threshold', type=int, default=1)
     parser.add_argument('--spatial_far_coarse_size', type=int, default=2)
+    parser.add_argument('--use_topo_memory', action='store_true', default=False)
+    parser.add_argument('--topo_max_nodes', type=int, default=16)
+    parser.add_argument('--topo_merge_radius', type=float, default=0.12)
+    parser.add_argument('--topo_create_radius', type=float, default=0.20)
+    parser.add_argument('--topo_merge_sim_threshold', type=float, default=0.80)
+    parser.add_argument('--topo_goal_rel_threshold', type=float, default=0.35)
+    parser.add_argument('--topo_novelty_threshold', type=float, default=0.30)
+    parser.add_argument('--topo_turn_threshold_deg', type=float, default=35.0)
+    parser.add_argument('--topo_knn', type=int, default=2)
+    parser.add_argument('--topo_spatial_edge_radius', type=float, default=0.20)
+    parser.add_argument('--topo_semantic_edge_threshold', type=float, default=0.90)
+    parser.add_argument('--topo_patch_neighbor_hops', type=int, default=1)
+    parser.add_argument('--topo_patch_topk', type=int, default=3)
+    if bool_optional_action is not None:
+        parser.add_argument(
+            '--topo_use_graph_encoder',
+            action=bool_optional_action,
+            default=True
+        )
+    else:
+        parser.add_argument('--topo_use_graph_encoder', type=int, choices=[0, 1], default=1)
+    parser.add_argument('--topo_message_passing_layers', type=int, default=1)
+    parser.add_argument('--topo_update_momentum', type=float, default=0.7)
+    parser.add_argument('--topo_offset_scale', type=float, default=0.08)
+    if bool_optional_action is not None:
+        parser.add_argument(
+            '--topo_aux_grid_supervision',
+            action=bool_optional_action,
+            default=True
+        )
+    else:
+        parser.add_argument('--topo_aux_grid_supervision', type=int, choices=[0, 1], default=1)
     parser.add_argument('--demb', type=int, default=768)
     parser.add_argument('--encoder_heads', type=int, default=12)
     parser.add_argument('--encoder_layers', type=int, default=2)

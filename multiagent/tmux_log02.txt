@@ -1,0 +1,350 @@
+[TopoEvalDebug] batch=0 pred_goals[min=0.0101, max=0.8217, mean=0.4159] valid_topo_nodes=1.00 max_cell_to_token=0.00 target_logits_token_shape=(1, 1) cell_to_token_map[min=0, max=0] anch
+[TopoHistoryWrite] batch=0 rollout_step=0 current_pose=[[0.15741956233978271, 0.9355614185333252]] current_grid=[4] written_cell_id=[4.0] history_len=1
+[TopoEvalHistory] batch=1 history_features_len=[1] history_cell_ids_len=[1] history_times_len=[1]
+[TopoEvalStep] batch=1 step_idx=0 cell_id=4 xy_t=[0.0, 0.800000011920929] create_new=True update_existing=False nearest_dist=inf nearest_similarity=0.0000 novelty=1.0000 goal_relevance=0
+[TopoEvalSpatial] batch=1 sample=0 valid_nodes=1 anchor_centers=[0.0, 0.800000011920929] offset=[0.1811303198337555, 0.2597375810146332] pred_goals=[0.01433400996029377, 0.82032400369644
+[TopoEvalSpatialSummary] batch=1 pred_goals_range=([0.01433400996029377, 0.8203240036964417], [0.01433400996029377, 0.8203240036964417]) candidate_global_range=([0.0, 0.0], [0.8000000119
+[TopoHistoryWrite] batch=0 rollout_step=1 current_pose=[[0.09365098178386688, 0.8809555768966675]] current_grid=[4] written_cell_id=[4.0] history_len=2
+[TopoEvalHistory] batch=2 history_features_len=[2] history_cell_ids_len=[2] history_times_len=[2]
+[TopoEvalStep] batch=2 step_idx=0 cell_id=4 xy_t=[0.0, 0.800000011920929] create_new=True update_existing=False nearest_dist=inf nearest_similarity=0.0000 novelty=1.0000 goal_relevance=0
+[TopoEvalStep] batch=2 step_idx=1 cell_id=4 xy_t=[0.0, 0.800000011920929] create_new=False update_existing=True nearest_dist=0.0000 nearest_similarity=0.7953 novelty=0.2047 goal_relevanc
+[TopoEvalSpatial] batch=2 sample=0 valid_nodes=1 anchor_centers=[0.0, 0.800000011920929] offset=[0.22656606137752533, 0.2595551311969757] pred_goals=[0.017821386456489563, 0.820310354232
+[TopoEvalSpatialSummary] batch=2 pred_goals_range=([0.017821386456489563, 0.8203103542327881], [0.017821386456489563, 0.8203103542327881]) candidate_global_range=([0.0, 0.0], [0.80000001
+[TopoHistoryWrite] batch=0 rollout_step=2 current_pose=[[0.015133663080632687, 0.8230489492416382]] current_grid=[4] written_cell_id=[4.0] history_len=3
+(hett) dell@dell-Precision-7920-Tower:/mnt/HDD/data/YST/HETT/HETT/multiagent$ cd /mnt/HDD/data/YST/HETT/HETT/multiagent
+(hett) dell@dell-Precision-7920-Tower:/mnt/HDD/data/YST/HETT/HETT/multiagent$ CUDA_VISIBLE_DEVICES=0 python main.py \
+>   --mode eval \
+>   --feedback student \
+>   --batch_size 1 \
+>   --max_action_len 10 \
+>   --move_iteration 10 \
+>   --grid_size 5 \
+>   --checkpoint /mnt/HDD/data/YST/HETT/HETT/datasets/checkpoint/best_val_unseen_0 \
+>   --darknet_model_file /mnt/HDD/data/YST/HETT/HETT/datasets/darknet/yolo_v3.cfg \
+>   --darknet_weight_file /mnt/HDD/data/YST/HETT/HETT/datasets/darknet/yolo_v3.pth \
+>   --use_topo_memory \
+>   --topo_use_graph_encoder \
+>   --topo_aux_grid_supervision
+
+generating episodes: 100%|████████████████████████████████████████████████████████████████████████████████████████████████████████████████████████████| 2470/2470 [00:25<00:00, 96.42it/s]
+generating episodes: 100%|███████████████████████████████████████████████████████████████████████████████████████████████████████████████████████████| 2697/2697 [00:25<00:00, 107.00it/s]
+generating episodes: 100%|███████████████████████████████████████████████████████████████████████████████████████████████████████████████████████████| 5281/5281 [00:49<00:00, 107.44it/s]
+Loading darknet weights from /mnt/HDD/data/YST/HETT/HETT/datasets/darknet/yolo_v3.pth
+Vision model initialized with Darknet weights.
+/home/dell/anaconda3/envs/hett/lib/python3.10/site-packages/torch/nn/modules/transformer.py:286: UserWarning: enable_nested_tensor is True, but self.use_nested_tensor is False because en
+coder_layer.self_attn.batch_first was not True(use batch_first for better inference performance)
+  warnings.warn(f"enable_nested_tensor is True, but self.use_nested_tensor is False because {why_not_sparsity_fast_path}")
+NOTICE: LOADing ALL KEYS IN THE  lang_model
+Model parameters:  109534641
+NOTICE: LOADing ALL KEYS IN THE  vision_model
+Model parameters:  41110240
+NOTICE: DIFFERENT KEYS IN THE  vln_model
+Model parameters:  20605036
+Loaded the listener model at epoch 25 from /mnt/HDD/data/YST/HETT/HETT/datasets/checkpoint/best_val_unseen_0
+[TopoEvalHistory] batch=0 history_features_len=[0] history_cell_ids_len=[0] history_times_len=[0] history_xy_len=[0]
+/home/dell/anaconda3/envs/hett/lib/python3.10/site-packages/torch/nn/functional.py:5109: UserWarning: Support for mismatched src_key_padding_mask and mask is deprecated. Use same type fo
+r both instead.
+  warnings.warn(
+[TopoEvalSpatial] batch=0 sample=0 valid_nodes=1 anchor_centers=[0.0, 0.4000000059604645] offset=[0.1197938323020935, 0.4376371204853058] pred_goals=[0.009537925943732262, 0.432934731245
+0409] candidate_range=([0.0, 0.0], [0.800000011920929, 0.800000011920929]) node_range=([0.0, 0.4000000059604645], [0.0, 0.4000000059604645]) node_preview=[[0.0, 0.4000000059604645]] insi
+de_unit_box=True edge_status=edge_near
+[TopoEvalSpatialSummary] batch=0 pred_goals_range=([0.009537925943732262, 0.4329347312450409], [0.009537925943732262, 0.4329347312450409]) candidate_global_range=([0.0, 0.0], [0.80000001
+1920929, 0.800000011920929]) pred_goals_in_unit_box=True edge_fraction=0.5000
+[TopoEvalDebug] batch=0 pred_goals[min=0.0095, max=0.4329, mean=0.2212] valid_topo_nodes=1.00 max_cell_to_token=0.00 target_logits_token_shape=(1, 1) cell_to_token_map[min=0, max=0] anch
+or_idx=[0] nodes_after_merge=1.00 created_nodes=1.00 updated_nodes=0.00
+[TopoHistoryWrite] batch=0 rollout_step=0 current_pose=[[0.0449821874499321, 0.5822254419326782]] current_grid=[2] written_cell_id=[2.0] written_xy=[[0.0449821874499321, 0.58222544193267
+82]] history_len=1
+[TopoEvalHistory] batch=1 history_features_len=[1] history_cell_ids_len=[1] history_times_len=[1] history_xy_len=[1]
+[TopoEvalStep] batch=1 step_idx=0 cell_id=2 xy_t=[0.0449821874499321, 0.5822254419326782] create_new=True update_existing=False nearest_dist=inf nearest_similarity=0.0000 novelty=1.0000
+goal_relevance=-0.0370 nodes_now=1
+[TopoEvalSpatial] batch=1 sample=0 valid_nodes=1 anchor_centers=[0.0449821874499321, 0.5822254419326782] offset=[0.34352144598960876, 0.17246922850608826] pred_goals=[0.07143159210681915
+, 0.5958877801895142] candidate_range=([0.0, 0.0], [0.800000011920929, 0.800000011920929]) node_range=([0.0449821874499321, 0.5822254419326782], [0.0449821874499321, 0.5822254419326782])
+ node_preview=[[0.0449821874499321, 0.5822254419326782]] inside_unit_box=True edge_status=not_edge_near
+[TopoEvalSpatialSummary] batch=1 pred_goals_range=([0.07143159210681915, 0.5958877801895142], [0.07143159210681915, 0.5958877801895142]) candidate_global_range=([0.0, 0.0], [0.8000000119
+20929, 0.800000011920929]) pred_goals_in_unit_box=True edge_fraction=0.0000
+[TopoHistoryWrite] batch=0 rollout_step=1 current_pose=[[0.026615070179104805, 0.49885889887809753]] current_grid=[2] written_cell_id=[2.0] written_xy=[[0.026615070179104805, 0.498858898
+87809753]] history_len=2
+[TopoEvalHistory] batch=2 history_features_len=[2] history_cell_ids_len=[2] history_times_len=[2] history_xy_len=[2]
+[TopoEvalStep] batch=2 step_idx=0 cell_id=2 xy_t=[0.0449821874499321, 0.5822254419326782] create_new=True update_existing=False nearest_dist=inf nearest_similarity=0.0000 novelty=1.0000
+goal_relevance=-0.0370 nodes_now=1
+[TopoEvalStep] batch=2 step_idx=1 cell_id=2 xy_t=[0.026615070179104805, 0.49885889887809753] create_new=False update_existing=True nearest_dist=0.0854 nearest_similarity=0.1425 novelty=0
+.8575 goal_relevance=0.0889 nodes_now=1
+[TopoEvalSpatial] batch=2 sample=0 valid_nodes=1 anchor_centers=[0.043145474046468735, 0.5738887786865234] offset=[0.31460821628570557, 0.12943431735038757] pred_goals=[0.067515358328819
+27, 0.5841860771179199] candidate_range=([0.0, 0.0], [0.800000011920929, 0.800000011920929]) node_range=([0.043145474046468735, 0.5738887786865234], [0.043145474046468735, 0.573888778686
+5234]) node_preview=[[0.043145474046468735, 0.5738887786865234]] inside_unit_box=True edge_status=not_edge_near
+[TopoEvalSpatialSummary] batch=2 pred_goals_range=([0.06751535832881927, 0.5841860771179199], [0.06751535832881927, 0.5841860771179199]) candidate_global_range=([0.0, 0.0], [0.8000000119
+20929, 0.800000011920929]) pred_goals_in_unit_box=True edge_fraction=0.0000
+[TopoHistoryWrite] batch=0 rollout_step=2 current_pose=[[0.05952344462275505, 0.5348668694496155]] current_grid=[2] written_cell_id=[2.0] written_xy=[[0.05952344462275505, 0.534866869449
+6155]] history_len=3
+[TopoHistoryWrite] batch=0 rollout_step=3 current_pose=[[0.0700189396739006, 0.5825048685073853]] current_grid=[2] written_cell_id=[2.0] written_xy=[[0.0700189396739006, 0.58250486850738
+53]] history_len=4
+[TopoHistoryWrite] batch=0 rollout_step=4 current_pose=[[0.06633652746677399, 0.5941307544708252]] current_grid=[2] written_cell_id=[2.0] written_xy=[[0.06633652746677399, 0.594130754470
+8252]] history_len=5
+[TopoHistoryWrite] batch=0 rollout_step=5 current_pose=[[0.07533852756023407, 0.5859036445617676]] current_grid=[2] written_cell_id=[2.0] written_xy=[[0.07533852756023407, 0.585903644561
+7676]] history_len=6
+[TopoHistoryWrite] batch=0 rollout_step=6 current_pose=[[0.08434052020311356, 0.5776765942573547]] current_grid=[2] written_cell_id=[2.0] written_xy=[[0.08434052020311356, 0.577676594257
+3547]] history_len=7
+[TopoHistoryWrite] batch=0 rollout_step=7 current_pose=[[0.09334251284599304, 0.5694494843482971]] current_grid=[2] written_cell_id=[2.0] written_xy=[[0.09334251284599304, 0.569449484348
+2971]] history_len=8
+[TopoEvalStage] batch=0 stage1_step=6 stage2_step=3 stage2_rotate=1 stage2_total=4 stage2_ratio=0.4000
+Progress: |--------------------------------------------------------------------------------| 0.0% 0m 2s (- 100m 16s) (1/2470)[TopoEvalDebug] batch=1 pred_goals[min=0.0052, max=0.2302, me
+an=0.1177] valid_topo_nodes=1.00 max_cell_to_token=0.00 target_logits_token_shape=(1, 1) cell_to_token_map[min=0, max=0] anchor_idx=[0] nodes_after_merge=1.00 created_nodes=1.00 updated_
+nodes=0.00
+[TopoHistoryWrite] batch=1 rollout_step=0 current_pose=[[0.11429224163293839, 0.24248631298542023]] current_grid=[1] written_cell_id=[1.0] written_xy=[[0.11429224163293839, 0.24248631298
+542023]] history_len=1
+[TopoHistoryWrite] batch=1 rollout_step=1 current_pose=[[0.05353918299078941, 0.2372814267873764]] current_grid=[1] written_cell_id=[1.0] written_xy=[[0.05353918299078941, 0.237281426787
+3764]] history_len=2
+[TopoHistoryWrite] batch=1 rollout_step=2 current_pose=[[0.10355044156312943, 0.2721655070781708]] current_grid=[1] written_cell_id=[1.0] written_xy=[[0.10355044156312943, 0.272165507078
+1708]] history_len=3
+[TopoHistoryWrite] batch=1 rollout_step=3 current_pose=[[0.10355044156312943, 0.2721655070781708]] current_grid=[1] written_cell_id=[1.0] written_xy=[[0.10355044156312943, 0.272165507078
+1708]] history_len=4
+[TopoHistoryWrite] batch=1 rollout_step=4 current_pose=[[0.10355044156312943, 0.2721655070781708]] current_grid=[1] written_cell_id=[1.0] written_xy=[[0.10355044156312943, 0.272165507078
+1708]] history_len=5
+[TopoHistoryWrite] batch=1 rollout_step=5 current_pose=[[0.10355044156312943, 0.2721655070781708]] current_grid=[1] written_cell_id=[1.0] written_xy=[[0.10355044156312943, 0.272165507078
+1708]] history_len=6
+[TopoHistoryWrite] batch=1 rollout_step=6 current_pose=[[0.10355044156312943, 0.2721655070781708]] current_grid=[1] written_cell_id=[1.0] written_xy=[[0.10355044156312943, 0.272165507078
+1708]] history_len=7
+[TopoHistoryWrite] batch=1 rollout_step=7 current_pose=[[0.10355044156312943, 0.2721655070781708]] current_grid=[1] written_cell_id=[1.0] written_xy=[[0.10355044156312943, 0.272165507078
+1708]] history_len=8
+[TopoEvalStage] batch=1 stage1_step=2 stage2_step=2 stage2_rotate=6 stage2_total=8 stage2_ratio=0.8000
+Progress: |--------------------------------------------------------------------------------| 0.1% 0m 2s (- 56m 13s) (2/2470)[TopoEvalDebug] batch=2 pred_goals[min=0.4239, max=0.8231, mea
+n=0.6235] valid_topo_nodes=1.00 max_cell_to_token=0.00 target_logits_token_shape=(1, 1) cell_to_token_map[min=0, max=0] anchor_idx=[0] nodes_after_merge=1.00 created_nodes=1.00 updated_n
+odes=0.00
+[TopoHistoryWrite] batch=2 rollout_step=0 current_pose=[[0.4001257121562958, 0.9509453773498535]] current_grid=[14] written_cell_id=[14.0] written_xy=[[0.4001257121562958, 0.950945377349
+8535]] history_len=1
+[TopoHistoryWrite] batch=2 rollout_step=1 current_pose=[[0.41780656576156616, 0.8302826881408691]] current_grid=[14] written_cell_id=[14.0] written_xy=[[0.41780656576156616, 0.8302826881
+408691]] history_len=2
+[TopoHistoryWrite] batch=2 rollout_step=2 current_pose=[[0.44031620025634766, 0.8869513869285583]] current_grid=[14] written_cell_id=[14.0] written_xy=[[0.44031620025634766, 0.8869513869
+285583]] history_len=3
+[TopoHistoryWrite] batch=2 rollout_step=3 current_pose=[[0.43147575855255127, 0.9472827315330505]] current_grid=[14] written_cell_id=[14.0] written_xy=[[0.43147575855255127, 0.9472827315
+330505]] history_len=4
+[TopoHistoryWrite] batch=2 rollout_step=4 current_pose=[[0.43147575855255127, 0.9472827315330505]] current_grid=[14] written_cell_id=[14.0] written_xy=[[0.43147575855255127, 0.9472827315
+330505]] history_len=5
+[TopoHistoryWrite] batch=2 rollout_step=5 current_pose=[[0.43147575855255127, 0.9472827315330505]] current_grid=[14] written_cell_id=[14.0] written_xy=[[0.43147575855255127, 0.9472827315
+330505]] history_len=6
+[TopoHistoryWrite] batch=2 rollout_step=6 current_pose=[[0.43147575855255127, 0.9472827315330505]] current_grid=[14] written_cell_id=[14.0] written_xy=[[0.43147575855255127, 0.9472827315
+330505]] history_len=7
+[TopoHistoryWrite] batch=2 rollout_step=7 current_pose=[[0.43147575855255127, 0.9472827315330505]] current_grid=[14] written_cell_id=[14.0] written_xy=[[0.43147575855255127, 0.9472827315
+330505]] history_len=8
+[TopoEvalStage] batch=2 stage1_step=3 stage2_step=0 stage2_rotate=7 stage2_total=7 stage2_ratio=0.7000
+Progress: |--------------------------------------------------------------------------------| 0.1% 0m 3s (- 41m 37s) (3/2470)[TopoEvalDebug] batch=3 pred_goals[min=0.6028, max=0.6334, mea
+n=0.6181] valid_topo_nodes=1.00 max_cell_to_token=0.00 target_logits_token_shape=(1, 1) cell_to_token_map[min=0, max=0] anchor_idx=[0] nodes_after_merge=1.00 created_nodes=1.00 updated_n
+odes=0.00
+[TopoEvalStage] batch=3 stage1_step=2 stage2_step=7 stage2_rotate=1 stage2_total=8 stage2_ratio=0.8000
+Progress: |--------------------------------------------------------------------------------| 0.2% 0m 3s (- 34m 14s) (4/2470)[TopoEvalDebug] batch=4 pred_goals[min=0.4304, max=0.7973, mea
+n=0.6138] valid_topo_nodes=1.00 max_cell_to_token=0.00 target_logits_token_shape=(1, 1) cell_to_token_map[min=0, max=0] anchor_idx=[0] nodes_after_merge=1.00 created_nodes=1.00 updated_n
+odes=0.00
+[TopoEvalStage] batch=4 stage1_step=3 stage2_step=5 stage2_rotate=2 stage2_total=7 stage2_ratio=0.7000
+Progress: |████████████████████████████████████████████████████████████████████████████████| 100.0% 13m 8s (- 0m 0s) (2470/2470))
+[EvalDebug][gp_sr] split=val_seen gp_success_count=0 oracle_gp_success_count=0 gp_source_empty=True oracle_gp_source_empty=True gp_denominator_zero=True oracle_gp_denominator_zero=True
+
+stage 3.1842 3.1680 3.6478
+
+compression tokens_before 0.0000 tokens_after 0.0000 near_tokens 0.0000 far_summary_tokens 0.0000 pruned_tokens 0.0000 merged_away_tokens 0.0000
+[TopoEvalHistory] batch=0 history_features_len=[0] history_cell_ids_len=[0] history_times_len=[0] history_xy_len=[0]
+[TopoEvalSpatial] batch=0 sample=0 valid_nodes=1 anchor_centers=[0.0, 0.800000011920929] offset=[0.12743954360485077, 0.2776305675506592] pred_goals=[0.01014032680541277, 0.8216568827629
+089] candidate_range=([0.0, 0.0], [0.800000011920929, 0.800000011920929]) node_range=([0.0, 0.800000011920929], [0.0, 0.800000011920929]) node_preview=[[0.0, 0.800000011920929]] inside_u
+nit_box=True edge_status=edge_near
+[TopoEvalSpatialSummary] batch=0 pred_goals_range=([0.01014032680541277, 0.8216568827629089], [0.01014032680541277, 0.8216568827629089]) candidate_global_range=([0.0, 0.0], [0.8000000119
+20929, 0.800000011920929]) pred_goals_in_unit_box=True edge_fraction=0.5000
+[TopoEvalDebug] batch=0 pred_goals[min=0.0101, max=0.8217, mean=0.4159] valid_topo_nodes=1.00 max_cell_to_token=0.00 target_logits_token_shape=(1, 1) cell_to_token_map[min=0, max=0] anch
+or_idx=[0] nodes_after_merge=1.00 created_nodes=1.00 updated_nodes=0.00
+[TopoHistoryWrite] batch=0 rollout_step=0 current_pose=[[0.15741956233978271, 0.9355614185333252]] current_grid=[4] written_cell_id=[4.0] written_xy=[[0.15741956233978271, 0.935561418533
+3252]] history_len=1
+[TopoEvalHistory] batch=1 history_features_len=[1] history_cell_ids_len=[1] history_times_len=[1] history_xy_len=[1]
+[TopoEvalStep] batch=1 step_idx=0 cell_id=4 xy_t=[0.15741956233978271, 0.9355614185333252] create_new=True update_existing=False nearest_dist=inf nearest_similarity=0.0000 novelty=1.0000
+ goal_relevance=0.0613 nodes_now=1
+[TopoEvalSpatial] batch=1 sample=0 valid_nodes=1 anchor_centers=[0.15741956233978271, 0.9355614185333252] offset=[0.20449991524219513, 0.09719599783420563] pred_goals=[0.1735552549362182
+6, 0.9433127045631409] candidate_range=([0.0, 0.0], [0.800000011920929, 0.800000011920929]) node_range=([0.15741956233978271, 0.9355614185333252], [0.15741956233978271, 0.935561418533325
+2]) node_preview=[[0.15741956233978271, 0.9355614185333252]] inside_unit_box=True edge_status=not_edge_near
+[TopoEvalSpatialSummary] batch=1 pred_goals_range=([0.17355525493621826, 0.9433127045631409], [0.17355525493621826, 0.9433127045631409]) candidate_global_range=([0.0, 0.0], [0.8000000119
+20929, 0.800000011920929]) pred_goals_in_unit_box=True edge_fraction=0.0000
+[TopoHistoryWrite] batch=0 rollout_step=1 current_pose=[[0.09365098178386688, 0.8809555768966675]] current_grid=[4] written_cell_id=[4.0] written_xy=[[0.09365098178386688, 0.880955576896
+6675]] history_len=2
+[TopoEvalHistory] batch=2 history_features_len=[2] history_cell_ids_len=[2] history_times_len=[2] history_xy_len=[2]
+[TopoEvalStep] batch=2 step_idx=0 cell_id=4 xy_t=[0.15741956233978271, 0.9355614185333252] create_new=True update_existing=False nearest_dist=inf nearest_similarity=0.0000 novelty=1.0000
+ goal_relevance=0.0613 nodes_now=1
+[TopoEvalStep] batch=2 step_idx=1 cell_id=4 xy_t=[0.09365098178386688, 0.8809555768966675] create_new=False update_existing=True nearest_dist=0.0840 nearest_similarity=0.7953 novelty=0.2
+047 goal_relevance=0.0791 nodes_now=1
+[TopoEvalSpatial] batch=2 sample=0 valid_nodes=1 anchor_centers=[0.15104269981384277, 0.9301007986068726] offset=[0.11627481877803802, 0.025307774543762207] pred_goals=[0.160302996635437
+, 0.9321249723434448] candidate_range=([0.0, 0.0], [0.800000011920929, 0.800000011920929]) node_range=([0.15104269981384277, 0.9301007986068726], [0.15104269981384277, 0.9301007986068726
+]) node_preview=[[0.15104269981384277, 0.9301007986068726]] inside_unit_box=True edge_status=not_edge_near
+[TopoEvalSpatialSummary] batch=2 pred_goals_range=([0.160302996635437, 0.9321249723434448], [0.160302996635437, 0.9321249723434448]) candidate_global_range=([0.0, 0.0], [0.80000001192092
+9, 0.800000011920929]) pred_goals_in_unit_box=True edge_fraction=0.0000
+[TopoHistoryWrite] batch=0 rollout_step=2 current_pose=[[0.12797556817531586, 0.9138464331626892]] current_grid=[4] written_cell_id=[4.0] written_xy=[[0.12797556817531586, 0.913846433162
+6892]] history_len=3
+[TopoHistoryWrite] batch=0 rollout_step=3 current_pose=[[0.15741956233978271, 0.9355614185333252]] current_grid=[4] written_cell_id=[4.0] written_xy=[[0.15741956233978271, 0.935561418533
+3252]] history_len=4
+[TopoHistoryWrite] batch=0 rollout_step=4 current_pose=[[0.15741956233978271, 0.9355614185333252]] current_grid=[4] written_cell_id=[4.0] written_xy=[[0.15741956233978271, 0.935561418533
+3252]] history_len=5
+[TopoHistoryWrite] batch=0 rollout_step=5 current_pose=[[0.15741956233978271, 0.9355614185333252]] current_grid=[4] written_cell_id=[4.0] written_xy=[[0.15741956233978271, 0.935561418533
+3252]] history_len=6
+[TopoHistoryWrite] batch=0 rollout_step=6 current_pose=[[0.15741956233978271, 0.9355614185333252]] current_grid=[4] written_cell_id=[4.0] written_xy=[[0.15741956233978271, 0.935561418533
+3252]] history_len=7
+[TopoHistoryWrite] batch=0 rollout_step=7 current_pose=[[0.15548886358737946, 0.9235200881958008]] current_grid=[4] written_cell_id=[4.0] written_xy=[[0.15548886358737946, 0.923520088195
+8008]] history_len=8
+[TopoEvalStage] batch=0 stage1_step=3 stage2_step=1 stage2_rotate=6 stage2_total=7 stage2_ratio=0.7000
+Progress: |--------------------------------------------------------------------------------| 0.0% 0m 0s (- 14m 48s) (1/2697)[TopoEvalDebug] batch=1 pred_goals[min=0.2250, max=0.4100, mea
+n=0.3175] valid_topo_nodes=1.00 max_cell_to_token=0.00 target_logits_token_shape=(1, 1) cell_to_token_map[min=0, max=0] anchor_idx=[0] nodes_after_merge=1.00 created_nodes=1.00 updated_n
+odes=0.00
+[TopoHistoryWrite] batch=1 rollout_step=0 current_pose=[[0.20924372971057892, 0.591991126537323]] current_grid=[7] written_cell_id=[7.0] written_xy=[[0.20924372971057892, 0.5919911265373
+23]] history_len=1
+[TopoHistoryWrite] batch=1 rollout_step=1 current_pose=[[0.2255951166152954, 0.4958101809024811]] current_grid=[7] written_cell_id=[7.0] written_xy=[[0.2255951166152954, 0.49581018090248
+11]] history_len=2
+[TopoHistoryWrite] batch=1 rollout_step=2 current_pose=[[0.236274853348732, 0.5421343445777893]] current_grid=[7] written_cell_id=[7.0] written_xy=[[0.236274853348732, 0.5421343445777893
+]] history_len=3
+[TopoHistoryWrite] batch=1 rollout_step=3 current_pose=[[0.22809916734695435, 0.5902248620986938]] current_grid=[7] written_cell_id=[7.0] written_xy=[[0.22809916734695435, 0.590224862098
+6938]] history_len=4
+[TopoHistoryWrite] batch=1 rollout_step=4 current_pose=[[0.23588056862354279, 0.5808349251747131]] current_grid=[7] written_cell_id=[7.0] written_xy=[[0.23588056862354279, 0.580834925174
+7131]] history_len=5
+[TopoHistoryWrite] batch=1 rollout_step=5 current_pose=[[0.2379244863986969, 0.5688123106956482]] current_grid=[7] written_cell_id=[7.0] written_xy=[[0.2379244863986969, 0.56881231069564
+82]] history_len=6
+[TopoHistoryWrite] batch=1 rollout_step=6 current_pose=[[0.2379244863986969, 0.5688123106956482]] current_grid=[7] written_cell_id=[7.0] written_xy=[[0.2379244863986969, 0.56881231069564
+82]] history_len=7
+[TopoHistoryWrite] batch=1 rollout_step=7 current_pose=[[0.22789262235164642, 0.575746476650238]] current_grid=[7] written_cell_id=[7.0] written_xy=[[0.22789262235164642, 0.5757464766502
+38]] history_len=8
+[TopoEvalStage] batch=1 stage1_step=5 stage2_step=1 stage2_rotate=4 stage2_total=5 stage2_ratio=0.5000
+Progress: |--------------------------------------------------------------------------------| 0.1% 0m 0s (- 14m 45s) (2/2697)[TopoEvalDebug] batch=2 pred_goals[min=0.4258, max=0.8105, mea
+n=0.6182] valid_topo_nodes=1.00 max_cell_to_token=0.00 target_logits_token_shape=(1, 1) cell_to_token_map[min=0, max=0] anchor_idx=[0] nodes_after_merge=1.00 created_nodes=1.00 updated_n
+odes=0.00
+[TopoHistoryWrite] batch=2 rollout_step=0 current_pose=[[0.8644353747367859, 0.5142346620559692]] current_grid=[22] written_cell_id=[22.0] written_xy=[[0.8644353747367859, 0.514234662055
+9692]] history_len=1
+[TopoHistoryWrite] batch=2 rollout_step=1 current_pose=[[0.8118780255317688, 0.4350028932094574]] current_grid=[22] written_cell_id=[22.0] written_xy=[[0.8118780255317688, 0.435002893209
+4574]] history_len=2
+[TopoHistoryWrite] batch=2 rollout_step=2 current_pose=[[0.8625410199165344, 0.46893349289894104]] current_grid=[22] written_cell_id=[22.0] written_xy=[[0.8625410199165344, 0.46893349289
+894104]] history_len=3
+[TopoHistoryWrite] batch=2 rollout_step=3 current_pose=[[0.8780556321144104, 0.4866628646850586]] current_grid=[22] written_cell_id=[22.0] written_xy=[[0.8780556321144104, 0.486662864685
+0586]] history_len=4
+[TopoHistoryWrite] batch=2 rollout_step=4 current_pose=[[0.8834376931190491, 0.4976061284542084]] current_grid=[22] written_cell_id=[22.0] written_xy=[[0.8834376931190491, 0.497606128454
+2084]] history_len=5
+[TopoHistoryWrite] batch=2 rollout_step=5 current_pose=[[0.888819694519043, 0.5085493922233582]] current_grid=[22] written_cell_id=[22.0] written_xy=[[0.888819694519043, 0.50854939222335
+82]] history_len=6
+[TopoHistoryWrite] batch=2 rollout_step=6 current_pose=[[0.888819694519043, 0.5085493922233582]] current_grid=[22] written_cell_id=[22.0] written_xy=[[0.888819694519043, 0.50854939222335
+82]] history_len=7
+[TopoHistoryWrite] batch=2 rollout_step=7 current_pose=[[0.888819694519043, 0.5085493922233582]] current_grid=[22] written_cell_id=[22.0] written_xy=[[0.888819694519043, 0.50854939222335
+82]] history_len=8
+[TopoEvalStage] batch=2 stage1_step=5 stage2_step=0 stage2_rotate=5 stage2_total=5 stage2_ratio=0.5000
+Progress: |--------------------------------------------------------------------------------| 0.1% 0m 0s (- 14m 35s) (3/2697)[TopoEvalDebug] batch=3 pred_goals[min=0.0222, max=0.4148, mea
+n=0.2185] valid_topo_nodes=1.00 max_cell_to_token=0.00 target_logits_token_shape=(1, 1) cell_to_token_map[min=0, max=0] anchor_idx=[0] nodes_after_merge=1.00 created_nodes=1.00 updated_n
+odes=0.00
+[TopoEvalStage] batch=3 stage1_step=2 stage2_step=5 stage2_rotate=3 stage2_total=8 stage2_ratio=0.8000
+Progress: |--------------------------------------------------------------------------------| 0.1% 0m 1s (- 14m 31s) (4/2697)[TopoEvalDebug] batch=4 pred_goals[min=0.0236, max=0.2156, mea
+n=0.1196] valid_topo_nodes=1.00 max_cell_to_token=0.00 target_logits_token_shape=(1, 1) cell_to_token_map[min=0, max=0] anchor_idx=[0] nodes_after_merge=1.00 created_nodes=1.00 updated_n
+odes=0.00
+[TopoEvalStage] batch=4 stage1_step=2 stage2_step=1 stage2_rotate=7 stage2_total=8 stage2_ratio=0.8000
+Progress: |████████████████████████████████████████████████████████████████████████████████| 100.0% 14m 31s (- 0m 0s) (2697/2697)
+[EvalDebug][gp_sr] split=val_unseen gp_success_count=0 oracle_gp_success_count=0 gp_source_empty=True oracle_gp_source_empty=True gp_denominator_zero=True oracle_gp_denominator_zero=True
+
+stage 3.2058 3.2414 3.5528
+
+compression tokens_before 0.0000 tokens_after 0.0000 near_tokens 0.0000 far_summary_tokens 0.0000 pruned_tokens 0.0000 merged_away_tokens 0.0000
+[TopoEvalHistory] batch=0 history_features_len=[0] history_cell_ids_len=[0] history_times_len=[0] history_xy_len=[0]
+[TopoEvalSpatial] batch=0 sample=0 valid_nodes=1 anchor_centers=[0.0, 0.0] offset=[0.09639537334442139, 0.320172518491745] pred_goals=[0.007687832694500685, 0.02477302961051464] candidat
+e_range=([0.0, 0.0], [0.800000011920929, 0.800000011920929]) node_range=([0.0, 0.0], [0.0, 0.0]) node_preview=[[0.0, 0.0]] inside_unit_box=True edge_status=edge_near
+[TopoEvalSpatialSummary] batch=0 pred_goals_range=([0.007687832694500685, 0.02477302961051464], [0.007687832694500685, 0.02477302961051464]) candidate_global_range=([0.0, 0.0], [0.800000
+011920929, 0.800000011920929]) pred_goals_in_unit_box=True edge_fraction=1.0000
+[TopoEvalDebug] batch=0 pred_goals[min=0.0077, max=0.0248, mean=0.0162] valid_topo_nodes=1.00 max_cell_to_token=0.00 target_logits_token_shape=(1, 1) cell_to_token_map[min=0, max=0] anch
+or_idx=[0] nodes_after_merge=1.00 created_nodes=1.00 updated_nodes=0.00
+[TopoHistoryWrite] batch=0 rollout_step=0 current_pose=[[0.14658929407596588, 0.1740151345729828]] current_grid=[0] written_cell_id=[0.0] written_xy=[[0.14658929407596588, 0.174015134572
+9828]] history_len=1
+[TopoEvalHistory] batch=1 history_features_len=[1] history_cell_ids_len=[1] history_times_len=[1] history_xy_len=[1]
+[TopoEvalStep] batch=1 step_idx=0 cell_id=0 xy_t=[0.14658929407596588, 0.1740151345729828] create_new=True update_existing=False nearest_dist=inf nearest_similarity=0.0000 novelty=1.0000
+ goal_relevance=0.0457 nodes_now=1
+[TopoEvalSpatial] batch=1 sample=0 valid_nodes=1 anchor_centers=[0.14658929407596588, 0.1740151345729828] offset=[0.25297462940216064, 0.1414957493543625] pred_goals=[0.1664063185453415,
+ 0.1852598488330841] candidate_range=([0.0, 0.0], [0.800000011920929, 0.800000011920929]) node_range=([0.14658929407596588, 0.1740151345729828], [0.14658929407596588, 0.1740151345729828]
+) node_preview=[[0.14658929407596588, 0.1740151345729828]] inside_unit_box=True edge_status=not_edge_near
+[TopoEvalSpatialSummary] batch=1 pred_goals_range=([0.1664063185453415, 0.1852598488330841], [0.1664063185453415, 0.1852598488330841]) candidate_global_range=([0.0, 0.0], [0.800000011920
+929, 0.800000011920929]) pred_goals_in_unit_box=True edge_fraction=0.0000
+[TopoHistoryWrite] batch=0 rollout_step=1 current_pose=[[0.0908748209476471, 0.14923764765262604]] current_grid=[0] written_cell_id=[0.0] written_xy=[[0.0908748209476471, 0.1492376476526
+2604]] history_len=2
+[TopoEvalHistory] batch=2 history_features_len=[2] history_cell_ids_len=[2] history_times_len=[2] history_xy_len=[2]
+[TopoEvalStep] batch=2 step_idx=0 cell_id=0 xy_t=[0.14658929407596588, 0.1740151345729828] create_new=True update_existing=False nearest_dist=inf nearest_similarity=0.0000 novelty=1.0000
+ goal_relevance=0.0457 nodes_now=1
+[TopoEvalStep] batch=2 step_idx=1 cell_id=0 xy_t=[0.0908748209476471, 0.14923764765262604] create_new=False update_existing=True nearest_dist=0.0610 nearest_similarity=0.5379 novelty=0.4
+621 goal_relevance=0.0915 nodes_now=1
+[TopoEvalSpatial] batch=2 sample=0 valid_nodes=1 anchor_centers=[0.1410178542137146, 0.171537384390831] offset=[0.38909101486206055, 0.12254609167575836] pred_goals=[0.1706639528274536,
+0.18129229545593262] candidate_range=([0.0, 0.0], [0.800000011920929, 0.800000011920929]) node_range=([0.1410178542137146, 0.171537384390831], [0.1410178542137146, 0.171537384390831]) no
+de_preview=[[0.1410178542137146, 0.171537384390831]] inside_unit_box=True edge_status=not_edge_near
+[TopoEvalSpatialSummary] batch=2 pred_goals_range=([0.1706639528274536, 0.18129229545593262], [0.1706639528274536, 0.18129229545593262]) candidate_global_range=([0.0, 0.0], [0.8000000119
+20929, 0.800000011920929]) pred_goals_in_unit_box=True edge_fraction=0.0000
+[TopoHistoryWrite] batch=0 rollout_step=2 current_pose=[[0.14658929407596588, 0.1740151345729828]] current_grid=[0] written_cell_id=[0.0] written_xy=[[0.14658929407596588, 0.174015134572
+9828]] history_len=3
+[TopoHistoryWrite] batch=0 rollout_step=3 current_pose=[[0.1688750684261322, 0.18392612040042877]] current_grid=[0] written_cell_id=[0.0] written_xy=[[0.1688750684261322, 0.1839261204004
+2877]] history_len=4
+[TopoHistoryWrite] batch=0 rollout_step=4 current_pose=[[0.1688750684261322, 0.18392612040042877]] current_grid=[0] written_cell_id=[0.0] written_xy=[[0.1688750684261322, 0.1839261204004
+2877]] history_len=5
+[TopoHistoryWrite] batch=0 rollout_step=5 current_pose=[[0.1688750684261322, 0.18392612040042877]] current_grid=[0] written_cell_id=[0.0] written_xy=[[0.1688750684261322, 0.1839261204004
+2877]] history_len=6
+[TopoHistoryWrite] batch=0 rollout_step=6 current_pose=[[0.1688750684261322, 0.18392612040042877]] current_grid=[0] written_cell_id=[0.0] written_xy=[[0.1688750684261322, 0.1839261204004
+2877]] history_len=7
+[TopoHistoryWrite] batch=0 rollout_step=7 current_pose=[[0.1688750684261322, 0.18392612040042877]] current_grid=[0] written_cell_id=[0.0] written_xy=[[0.1688750684261322, 0.1839261204004
+2877]] history_len=8
+[TopoEvalStage] batch=0 stage1_step=3 stage2_step=0 stage2_rotate=7 stage2_total=7 stage2_ratio=0.7000
+Progress: |--------------------------------------------------------------------------------| 0.0% 0m 0s (- 29m 12s) (1/5281)[TopoEvalDebug] batch=1 pred_goals[min=0.0025, max=0.2095, mea
+n=0.1060] valid_topo_nodes=1.00 max_cell_to_token=0.00 target_logits_token_shape=(1, 1) cell_to_token_map[min=0, max=0] anchor_idx=[0] nodes_after_merge=1.00 created_nodes=1.00 updated_n
+odes=0.00
+[TopoHistoryWrite] batch=1 rollout_step=0 current_pose=[[0.28532060980796814, 0.19574767351150513]] current_grid=[5] written_cell_id=[5.0] written_xy=[[0.28532060980796814, 0.19574767351
+150513]] history_len=1
+[TopoHistoryWrite] batch=1 rollout_step=1 current_pose=[[0.24488264322280884, 0.13476631045341492]] current_grid=[5] written_cell_id=[5.0] written_xy=[[0.24488264322280884, 0.13476631045
+341492]] history_len=2
+[TopoHistoryWrite] batch=1 rollout_step=2 current_pose=[[0.28019896149635315, 0.16595757007598877]] current_grid=[5] written_cell_id=[5.0] written_xy=[[0.28019896149635315, 0.16595757007
+598877]] history_len=3
+[TopoHistoryWrite] batch=1 rollout_step=3 current_pose=[[0.300417959690094, 0.19644826650619507]] current_grid=[5] written_cell_id=[5.0] written_xy=[[0.300417959690094, 0.196448266506195
+07]] history_len=4
+[TopoHistoryWrite] batch=1 rollout_step=4 current_pose=[[0.300417959690094, 0.19644826650619507]] current_grid=[5] written_cell_id=[5.0] written_xy=[[0.300417959690094, 0.196448266506195
+07]] history_len=5
+[TopoHistoryWrite] batch=1 rollout_step=5 current_pose=[[0.3124406635761261, 0.19849161803722382]] current_grid=[5] written_cell_id=[5.0] written_xy=[[0.3124406635761261, 0.1984916180372
+2382]] history_len=6
+[TopoHistoryWrite] batch=1 rollout_step=6 current_pose=[[0.3124406635761261, 0.19849161803722382]] current_grid=[5] written_cell_id=[5.0] written_xy=[[0.3124406635761261, 0.1984916180372
+2382]] history_len=7
+[TopoHistoryWrite] batch=1 rollout_step=7 current_pose=[[0.30259764194488525, 0.20569132268428802]] current_grid=[6] written_cell_id=[6.0] written_xy=[[0.30259764194488525, 0.20569132268
+428802]] history_len=8
+[TopoEvalStage] batch=1 stage1_step=3 stage2_step=2 stage2_rotate=5 stage2_total=7 stage2_ratio=0.7000
+Progress: |--------------------------------------------------------------------------------| 0.0% 0m 0s (- 28m 40s) (2/5281)[TopoEvalDebug] batch=2 pred_goals[min=0.0000, max=0.0200, mea
+n=0.0100] valid_topo_nodes=1.00 max_cell_to_token=0.00 target_logits_token_shape=(1, 1) cell_to_token_map[min=0, max=0] anchor_idx=[0] nodes_after_merge=1.00 created_nodes=1.00 updated_n
+odes=0.00
+[TopoHistoryWrite] batch=2 rollout_step=0 current_pose=[[0.07326991856098175, 0.13526156544685364]] current_grid=[0] written_cell_id=[0.0] written_xy=[[0.07326991856098175, 0.13526156544
+685364]] history_len=1
+[TopoHistoryWrite] batch=2 rollout_step=1 current_pose=[[0.052054550498723984, 0.0927186980843544]] current_grid=[0] written_cell_id=[0.0] written_xy=[[0.052054550498723984, 0.0927186980
+843544]] history_len=2
+[TopoHistoryWrite] batch=2 rollout_step=2 current_pose=[[0.0916990265250206, 0.11895421147346497]] current_grid=[0] written_cell_id=[0.0] written_xy=[[0.0916990265250206, 0.1189542114734
+6497]] history_len=3
+[TopoHistoryWrite] batch=2 rollout_step=3 current_pose=[[0.0916990265250206, 0.11895421147346497]] current_grid=[0] written_cell_id=[0.0] written_xy=[[0.0916990265250206, 0.1189542114734
+6497]] history_len=4
+[TopoHistoryWrite] batch=2 rollout_step=4 current_pose=[[0.0916990265250206, 0.11895421147346497]] current_grid=[0] written_cell_id=[0.0] written_xy=[[0.0916990265250206, 0.1189542114734
+6497]] history_len=5
+[TopoHistoryWrite] batch=2 rollout_step=5 current_pose=[[0.0916990265250206, 0.11895421147346497]] current_grid=[0] written_cell_id=[0.0] written_xy=[[0.0916990265250206, 0.1189542114734
+6497]] history_len=6
+[TopoHistoryWrite] batch=2 rollout_step=6 current_pose=[[0.0916990265250206, 0.11895421147346497]] current_grid=[0] written_cell_id=[0.0] written_xy=[[0.0916990265250206, 0.1189542114734
+6497]] history_len=7
+[TopoHistoryWrite] batch=2 rollout_step=7 current_pose=[[0.10268896818161011, 0.12424026429653168]] current_grid=[0] written_cell_id=[0.0] written_xy=[[0.10268896818161011, 0.12424026429
+653168]] history_len=8
+[TopoEvalStage] batch=2 stage1_step=2 stage2_step=4 stage2_rotate=4 stage2_total=8 stage2_ratio=0.8000
+Progress: |--------------------------------------------------------------------------------| 0.1% 0m 0s (- 28m 55s) (3/5281)[TopoEvalDebug] batch=3 pred_goals[min=0.0275, max=0.6134, mea
+n=0.3205] valid_topo_nodes=1.00 max_cell_to_token=0.00 target_logits_token_shape=(1, 1) cell_to_token_map[min=0, max=0] anchor_idx=[0] nodes_after_merge=1.00 created_nodes=1.00 updated_n
+odes=0.00
+[TopoEvalStage] batch=3 stage1_step=4 stage2_step=4 stage2_rotate=2 stage2_total=6 stage2_ratio=0.6000
+Progress: |--------------------------------------------------------------------------------| 0.1% 0m 1s (- 29m 21s) (4/5281)[TopoEvalDebug] batch=4 pred_goals[min=0.0084, max=0.2154, mea
+n=0.1119] valid_topo_nodes=1.00 max_cell_to_token=0.00 target_logits_token_shape=(1, 1) cell_to_token_map[min=0, max=0] anchor_idx=[0] nodes_after_merge=1.00 created_nodes=1.00 updated_n
+odes=0.00
+[TopoEvalStage] batch=4 stage1_step=3 stage2_step=5 stage2_rotate=2 stage2_total=7 stage2_ratio=0.7000
+Progress: |████████████████████████████████████████████████████████████████████████████████| 100.0% 31m 55s (- 0m 0s) (5281/5281))
+[EvalDebug][gp_sr] split=test_unseen gp_success_count=0 oracle_gp_success_count=0 gp_source_empty=True oracle_gp_source_empty=True gp_denominator_zero=True oracle_gp_denominator_zero=Tru
+e
+
+stage 3.1973 3.0415 3.7612
+
+compression tokens_before 0.0000 tokens_after 0.0000 near_tokens 0.0000 far_summary_tokens 0.0000 pruned_tokens 0.0000 merged_away_tokens 0.0000
+
+
+epoch 25
+val_seen , lengths: 83.92, stage1_length: 68.08, stage2_length: 15.84, sr: 1.38, sr1: 1.01, sr2: 1.38, oracle_sr: 2.43, oracle_sr1: 2.02, oracle_sr2: 1.58, spl: 0.37, ne: 189.04, oracle_
+ne: 177.32, stage1_ne: 194.71, stage1_oracle_ne: 182.79, stage2_ne: 189.04, stage2_oracle_ne: 186.72, gt_length: 196.98, gp_sr: 0.00, oracle_gp_sr: 0.00
+val_unseen , lengths: 84.84, stage1_length: 68.64, stage2_length: 16.21, sr: 1.30, sr1: 0.96, sr2: 1.30, oracle_sr: 2.15, oracle_sr1: 1.74, oracle_sr2: 1.56, spl: 0.36, ne: 200.75, oracl
+e_ne: 186.80, stage1_ne: 205.67, stage1_oracle_ne: 192.38, stage2_ne: 200.75, stage2_oracle_ne: 197.87, gt_length: 207.71, gp_sr: 0.00, oracle_gp_sr: 0.00
+test_unseen , lengths: 83.42, stage1_length: 68.21, stage2_length: 15.21, sr: 1.89, sr1: 1.23, sr2: 1.89, oracle_sr: 3.47, oracle_sr1: 3.03, oracle_sr2: 2.14, spl: 0.54, ne: 178.07, orac
+le_ne: 164.94, stage1_ne: 182.85, stage1_oracle_ne: 169.73, stage2_ne: 178.07, stage2_oracle_ne: 175.48, gt_length: 185.15, gp_sr: 0.00, oracle_gp_sr: 0.00
+(hett) dell@dell-Precision-7920-Tower:/mnt/HDD/data/YST/HETT/HETT/multiagent$
+(hett) dell@dell-Precision-7920-Tower:/mnt/HDD/data/YST/HETT/HETT/multiagent$ tmux capture-pane -p -S -300 > tmux_log02.txt
+
+
