@@ -1,10 +1,10 @@
 #!/bin/bash
+set -euo pipefail
+
 ngpus=1
 seed=0
-# export NCCL_DEBUG=INFO
 
-# 【修改点】：这里已经帮你把最后那一行的 --output_dir 删掉了
-flag="--world_size ${ngpus} \
+BASE_FLAGS="--world_size ${ngpus} \
       --seed ${seed} \
       --feedback student \
       --mode train \
@@ -21,16 +21,19 @@ flag="--world_size ${ngpus} \
       --max_action_len 20 \
       --darknet_model_file /mnt/HDD/data/YST/HETT/HETT/datasets/darknet/yolo_v3.cfg \
       --darknet_weight_file /mnt/HDD/data/YST/HETT/HETT/datasets/darknet/yolo_v3.pth \
-      --grid_size 5 \
-      --checkpoint ../datasets/checkpoint/latest \
-      --resume_optimizer"
+      --grid_size 5 "
+
+SPATIAL_FLAGS="${SPATIAL_FLAGS:-}"
+MEMORY_FLAGS="${MEMORY_FLAGS:-}"
+
+flag="${BASE_FLAGS} ${SPATIAL_FLAGS} ${MEMORY_FLAGS}"
 
 NNODES=${NNODES:-1}
 NODE_RANK=${NODE_RANK:-0}
 PORT=${PORT:-29536}
-MASTER_ADDR=${MASTER_ADDR:-"127.0.0.1"}
-
-# train
+MASTER_ADDR=${MASTER_ADDR:-127.0.0.1}
+echo "Running with flags:"
+echo "${flag}"
 CUDA_VISIBLE_DEVICES='0' python -m torch.distributed.run \
     --nnodes=$NNODES \
     --node_rank=$NODE_RANK \
@@ -38,3 +41,7 @@ CUDA_VISIBLE_DEVICES='0' python -m torch.distributed.run \
     --nproc_per_node=$ngpus \
     --master_port=$PORT \
     main.py $flag
+
+      #  --spatial_compression \
+    #  --spatial_dist_threshold 2 \
+     # --spatial_far_coarse_size 2"

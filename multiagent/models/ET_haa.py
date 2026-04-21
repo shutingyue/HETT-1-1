@@ -132,7 +132,7 @@ class ET(nn.Module):
 
         self.text_proj = nn.Linear(768, 768)
         self.grid_proj = nn.Linear(768, 768)
-        self.use_topo_memory = args.use_topo_memory
+        self.use_topo_memory = args.enable_topo_memory
         if self.use_topo_memory:
             self.topo_memory_builder = TopoMemoryBuilder(args)
             self.topo_goal_offset = nn.Sequential(
@@ -293,10 +293,14 @@ class ET(nn.Module):
         grid_fts = inputs['grid_fts']
         grid_map_indexs = inputs['grid_index']
         current_grids = inputs['current_grid']
+        topo_memory_outputs = inputs.get('topo_memory_outputs', None)
         # 【新增】：从 inputs 字典中安全地取出时间参数
         time_steps = inputs.get('time_steps', None)
         current_t = inputs.get('current_t', None)
         topo_xy_history = inputs.get('topo_xy', None)
+        topo_landmarks = inputs.get('topo_landmarks', None)
+        topo_eval_debug = False
+        topo_eval_batch_idx = None
 
         candidate_token_features = []
         candidate_token_positions = []
@@ -351,7 +355,30 @@ class ET(nn.Module):
                     compression_stats[key].append(value)
 
         topo_outputs = None
-        if self.use_topo_memory:
+        if self.use_topo_memory and topo_memory_outputs is not None:
+            topo_outputs = topo_memory_outputs
+            emb_candidates = torch.zeros(
+                batch_size,
+                topo_outputs["node_features_padded"].shape[1],
+                self.args.demb,
+                device=emb_lang.device,
+            )
+            spatial_padding_mask = topo_outputs["node_padding_mask"]
+            cell_to_token_map = topo_outputs["cell_to_node_map"]
+            for b in range(batch_size):
+                token_count = int((~spatial_padding_mask[b]).sum().item())
+                if token_count == 0:
+                    continue
+                pos_embed = (
+                    self.candidate_encoder(topo_outputs["node_positions_padded"][b, :token_count])
+                    * emb_lang[b:b + 1, :1, :]
+                )
+                emb_candidates[b, :token_count] = (
+                    pos_embed.squeeze(0) + topo_outputs["node_features_padded"][b, :token_count]
+                )
+            for key, value in topo_outputs["stats"].items():
+                compression_stats[key].append(value)
+        elif self.use_topo_memory and self.args.topo_rebuild_fallback:
             topo_eval_debug = (
                 not self.training and self.use_topo_memory and self.topo_eval_debug_batches < 3
             )
@@ -395,6 +422,7 @@ class ET(nn.Module):
                 topo_history_index_tensor,
                 topo_history_times_tensor,
                 topo_history_xy_tensor,
+                topo_landmarks,
                 base_positions,
                 # Compatibility-first fallback: use the first language token as a pooled goal embedding.
                 # Future work can replace this with a better lang_cls / instruction pooling path.
@@ -470,6 +498,8 @@ class ET(nn.Module):
         target_decoder_input = encoder_out_candidates.reshape(-1, max_cell_num, self.args.demb)
 
         if self.use_topo_memory and topo_outputs is not None:
+            local_context = topo_outputs["local_context"]
+            local_patch_context = topo_outputs["local_patch_context"]
             masked_node_logits = self.decoder_2_logits_full(target_decoder_input).squeeze(-1)
             masked_node_logits = masked_node_logits.masked_fill(spatial_padding_mask, -1e9)
             fully_masked = spatial_padding_mask.all(dim=1)
@@ -577,10 +607,14 @@ class ET(nn.Module):
                 neighbor_patch = neighbor_patch / neighbor_weights.sum(dim=1).clamp_min(1.0)
             else:
                 neighbor_patch = torch.zeros_like(anchor_patch)
-            patch_context = self.topo_patch_proj(anchor_patch + neighbor_patch)
+            patch_context = self.topo_patch_proj(anchor_patch + neighbor_patch + local_patch_context)
             decoder_input = self._fuse_patch_context(decoder_input, patch_context, self.topo_visual_gate)
             action_decoder_input = self._fuse_patch_context(
                 action_decoder_input, patch_context, self.topo_action_gate
+            )
+            decoder_input = self._fuse_patch_context(decoder_input, local_context, self.topo_visual_gate)
+            action_decoder_input = self._fuse_patch_context(
+                action_decoder_input, local_context, self.topo_action_gate
             )
             target_logits_token = masked_node_logits
             if topo_eval_debug:

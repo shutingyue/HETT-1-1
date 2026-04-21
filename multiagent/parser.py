@@ -83,6 +83,14 @@ def parse_args():
     parser = argparse.ArgumentParser()
     bool_optional_action = getattr(argparse, 'BooleanOptionalAction', None)
 
+    def add_bool_flag(name, default, help_text=None):
+        if bool_optional_action is not None:
+            parser.add_argument(f'--{name}', action=bool_optional_action, default=default, help=help_text)
+        else:
+            parser.add_argument(f'--{name}', dest=name, action='store_true', help=help_text)
+            parser.add_argument(f'--no-{name}', dest=name, action='store_false')
+            parser.set_defaults(**{name: default})
+
     parser.add_argument('--seed', type=int, default=0)
     parser.add_argument('--mode', type=str, choices=['train', 'eval', 'visualize'], default='train')
     parser.add_argument('--local_rank', type=int, default=-1)
@@ -93,17 +101,37 @@ def parse_args():
 
     # model
     parser.add_argument('--grid_size', type=int, default=7)
-    parser.add_argument('--spatial_compression', action='store_true', default=False)
+    add_bool_flag('spatial_compression', default=False)
     parser.add_argument('--spatial_dist_threshold', type=int, default=1)
     parser.add_argument('--spatial_far_coarse_size', type=int, default=2)
     parser.add_argument('--use_topo_memory', action='store_true', default=False)
+    add_bool_flag('enable_topo_memory', default=False)
+    add_bool_flag('persistent_topo_memory', default=False)
+    add_bool_flag('topo_seed_first_observation', default=False)
+    add_bool_flag('topo_rebuild_fallback', default=True)
     parser.add_argument('--topo_max_nodes', type=int, default=16)
+    parser.add_argument('--max_place_nodes', type=int, default=16)
+    parser.add_argument('--max_landmark_nodes', type=int, default=16)
+    parser.add_argument('--max_event_nodes', type=int, default=16)
     parser.add_argument('--topo_merge_radius', type=float, default=0.12)
+    parser.add_argument('--place_merge_radius', type=float, default=0.12)
     parser.add_argument('--topo_create_radius', type=float, default=0.20)
     parser.add_argument('--topo_merge_sim_threshold', type=float, default=0.80)
     parser.add_argument('--topo_goal_rel_threshold', type=float, default=0.35)
     parser.add_argument('--topo_novelty_threshold', type=float, default=0.30)
     parser.add_argument('--topo_turn_threshold_deg', type=float, default=35.0)
+    parser.add_argument('--new_node_vis_threshold', type=float, default=0.35)
+    parser.add_argument('--turn_event_threshold_deg', type=float, default=35.0)
+    parser.add_argument('--relevance_jump_threshold', type=float, default=0.20)
+    parser.add_argument('--geo_weight', type=float, default=0.35)
+    parser.add_argument('--vis_weight', type=float, default=0.35)
+    parser.add_argument('--goal_weight', type=float, default=0.20)
+    parser.add_argument('--sem_weight', type=float, default=0.10)
+    parser.add_argument('--global_retrieve_k', type=int, default=16)
+    parser.add_argument('--local_hops', type=int, default=1)
+    parser.add_argument('--patch_bank_size', type=int, default=3)
+    add_bool_flag('use_event_nodes', default=False)
+    add_bool_flag('use_landmark_nodes', default=False)
     parser.add_argument('--topo_knn', type=int, default=2)
     parser.add_argument('--topo_spatial_edge_radius', type=float, default=0.20)
     parser.add_argument('--topo_semantic_edge_threshold', type=float, default=0.90)
@@ -178,7 +206,7 @@ def parse_args():
     parser.add_argument('--epochs', type=int, default=20)
     parser.add_argument('--iters', type=int, default=200000)
     parser.add_argument('--checkpoint', type=str, default=None)
-    parser.add_argument("--resume_optimizer", action="store_true", default=False)
+    add_bool_flag('resume_optimizer', default=False)
     parser.add_argument('--save_every', type=int, default=10)
     parser.add_argument('--train_trajectory_type', type=str, choices=['sp', 'mturk', 'both'], default='mturk')
     parser.add_argument('--train_episode_sample_size', type=int, default=-1)
@@ -207,6 +235,17 @@ def postprocess_args(args):
 
     args.map_shape = (args.map_size, args.map_size)
     args.map_pixels_per_meter = args.map_size / args.map_meters
+    args.enable_topo_memory = bool(args.enable_topo_memory or args.use_topo_memory)
+    args.use_topo_memory = args.enable_topo_memory
+    args.max_place_nodes = int(args.max_place_nodes or args.topo_max_nodes)
+    args.topo_max_nodes = args.max_place_nodes
+    args.place_merge_radius = float(args.place_merge_radius or args.topo_merge_radius)
+    args.topo_merge_radius = args.place_merge_radius
+    args.turn_event_threshold_deg = float(args.turn_event_threshold_deg or args.topo_turn_threshold_deg)
+    args.topo_turn_threshold_deg = args.turn_event_threshold_deg
+    args.global_retrieve_k = max(int(args.global_retrieve_k), 1)
+    args.patch_bank_size = max(int(args.patch_bank_size), 1)
+    args.local_hops = max(int(args.local_hops), 1)
 
 
     return args

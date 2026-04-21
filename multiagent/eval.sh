@@ -10,6 +10,8 @@ export MKL_NUM_THREADS=1
 
 ngpus=1
 seed=0
+SPATIAL_FLAGS=${SPATIAL_FLAGS:-}
+MEMORY_FLAGS=${MEMORY_FLAGS:-}
 
 # 所有的参数写在这里，注意最后一行千万不要加反斜杠 \
 flag="--world_size ${ngpus} \
@@ -30,7 +32,9 @@ flag="--world_size ${ngpus} \
       --grid_size 5 \
       --darknet_model_file /mnt/HDD/data/YST/HETT/HETT/datasets/darknet/yolo_v3.cfg \
       --darknet_weight_file /mnt/HDD/data/YST/HETT/HETT/datasets/darknet/yolo_v3.pth \
-      --checkpoint /mnt/HDD/data/YST/HETT/HETT/datasets/checkpoint/best_val_unseen"
+      --checkpoint /mnt/HDD/data/YST/HETT/HETT/datasets/checkpoint/best_val_unseen \
+      ${SPATIAL_FLAGS} \
+      ${MEMORY_FLAGS}"
       
 # 注意上方增加了 --num_workers 0 \ ，强制让 DataLoader 使用单主进程加载数据
 

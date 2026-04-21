@@ -25,6 +25,7 @@ from multiagent.models.dark_net import Darknet
 from multiagent.models.CLIP import CLIP
 # from direction.models.ddppo.resenet_encoders import TorchVisionResNet50
 from multiagent.models.goal_predictor import GoalPredictor, MapEncoder
+from multiagent.models.topo_memory import BatchedTopoMemory
 from multiagent.observation import cropclient
 from multiagent.space import Pose4D, Point2D, Point3D
 from multiagent.teacher.algorithm.lookahead import lookahead_discrete_action
@@ -234,6 +235,7 @@ class NavCMTAgent:
         self.topo_eval_stage_batches = 0
         self.topo_eval_debug_limit = 5
         self.topo_history_debug_batches = 0
+        self.topo_memory_manager = BatchedTopoMemory(self.args) if self.args.enable_topo_memory else None
 
     def get_results(self):
 
@@ -442,6 +444,7 @@ class NavCMTAgent:
             'grid_fts': torch.zeros(batch_size, 0, 768).cuda(),
             'grid_index': torch.zeros(batch_size, 0).cuda(),
             'topo_xy': torch.zeros(batch_size, 0, 2).cuda(),
+            'topo_landmarks': [[] for _ in range(batch_size)],
             'time_steps': torch.zeros(batch_size, 0).cuda(), # 新增：记录特征的时间戳
             'frames': torch.zeros(batch_size, 0, 512, 49).cuda(),
             'lenths': [0 for _ in range(batch_size)],
@@ -451,6 +454,14 @@ class NavCMTAgent:
             'lang_cls': linear_cls,
             'map_fts': torch.zeros(batch_size, 0, 512, 49).cuda(),
         }
+
+        if self.args.enable_topo_memory and self.topo_memory_manager is not None:
+            topo_fallback_features = torch.zeros(batch_size, self.args.demb, device=lang_features.device)
+            self.topo_memory_manager.start_batch(
+                base_positions=global_positions,
+                instruction_feat=lang_features[:, 0, :].detach(),
+                fallback_features=topo_fallback_features,
+            )
 
         stage1_ended = np.array([False] * batch_size)
 
@@ -501,9 +512,9 @@ class NavCMTAgent:
 
             # print('.')
 
-
-
-
+            topo_memory_outputs = None
+            if self.args.enable_topo_memory and self.topo_memory_manager is not None:
+                topo_memory_outputs = self.topo_memory_manager.retrieve_batch(lang_features[:, 0, :])
 
             pred_direction, pred_progress, pred_goals, pred_logits, grid_ft, compression_stats = self.vln_model(
                 directions=input['directions'],
@@ -512,6 +523,7 @@ class NavCMTAgent:
                 grid_fts=input['grid_fts'],
                 grid_index=input['grid_index'],
                 topo_xy=input['topo_xy'],
+                topo_landmarks=input['topo_landmarks'],
                 # `cur_grid` from env.py uses the same flattened indexing as historical `grid_index`:
                 # row_id * grid_size + col_id. ET uses this shared convention for near/far splitting.
                 current_grid=torch.tensor(np.array([ob['cur_grid'] for ob in obs]), dtype=torch.long).cuda(),
@@ -520,6 +532,7 @@ class NavCMTAgent:
                 candidates=input['candidates'],
                 centroids=input['centroids'],
                 lang_cls=input['lang_cls'],
+                topo_memory_outputs=topo_memory_outputs,
                 current_t=t,                      # 【新增】告诉模型现在是第几步
                 time_steps=input['time_steps']    # 【新增】告诉模型过去特征的时间标签
             )
@@ -564,6 +577,25 @@ class NavCMTAgent:
 
             input['grid_index'] = torch.cat((input['grid_index'], grid_index), dim=1)
             input['topo_xy'] = torch.cat((input['topo_xy'], topo_xy), dim=1)
+            for batch_idx, ob in enumerate(obs):
+                input['topo_landmarks'][batch_idx].append(ob.get('topo_landmarks', []))
+            if self.args.enable_topo_memory and self.topo_memory_manager is not None:
+                positive_decay_rate = F.softplus(self.vln_model_without_ddp.decay_rate.detach())
+                for batch_idx, ob in enumerate(obs):
+                    if ended[batch_idx]:
+                        continue
+                    update_stats = self.topo_memory_manager.update_env_step(
+                        env_idx=batch_idx,
+                        observation_feature=grid_ft[batch_idx].detach(),
+                        cell_id=int(ob['cur_grid']),
+                        xy=topo_xy[batch_idx, 0].detach(),
+                        landmark_info=ob.get('topo_landmarks', []),
+                        step_id=t,
+                        time_decay_rate=positive_decay_rate,
+                        fallback_feature=grid_ft[batch_idx].detach(),
+                    )
+                    for key, value in update_stats.items():
+                        self.logs[key].append(value)
             # 【新增】特征追加完，时间标签也同步追加。
             # 生成一个形状为 (batch_size, 1)，值为当前时间 t 的张量
             current_time_step = torch.full((batch_size, 1), t, dtype=torch.float32).cuda()
@@ -903,7 +935,11 @@ class NavCMTAgent:
             state.update(state_dict)
             model.load_state_dict(state)
             if self.args.resume_optimizer:
-                optimizer.load_state_dict(states[name]['optimizer'])
+                try:
+                    optimizer.load_state_dict(states[name]['optimizer'])
+                    print(f"[INFO] Loaded optimizer state for {name}.")
+                except ValueError as e:
+                    print(f"[WARN] Skip loading optimizer state for {name}: {e}")
 
             def count_parameters(mo):
                 return sum(p.numel() for p in mo.parameters() if p.requires_grad)

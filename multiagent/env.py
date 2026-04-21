@@ -273,6 +273,19 @@ class CityNavBatch(torch.utils.data.IterableDataset):
             normalized_centroids = [self.normalize_position(Point2D(centroid[0], centroid[1]),
                                                             episode.map_name,
                                                             self.args.map_meters) for centroid in centroids]
+            topo_landmarks = []
+            for landmark_name, contour, normalized_centroid in zip(
+                self.nav_maps[i].landmark_map.landmark_names,
+                landmarks,
+                normalized_centroids,
+            ):
+                topo_landmarks.append(
+                    {
+                        'name': landmark_name,
+                        'centroid': np.array(normalized_centroid, dtype=np.float32),
+                        'polygon': [[float(point.x), float(point.y)] for point in contour],
+                    }
+                )
             # normalized_centroids
             # print(landmarks, centroids)
             pred_goal_xy = np.mean(centroids, axis=0) if centroids else np.array([0, 0])
@@ -296,6 +309,7 @@ class CityNavBatch(torch.utils.data.IterableDataset):
                 'trajectory': episode.trajectory,
                 'progress': progress,
                 'centroids': np.mean(normalized_centroids, axis=0) if normalized_centroids else np.array([0, 0]),
+                'topo_landmarks': topo_landmarks,
                 'centroid_goal': pred_goal_xy,
                 'normalized_goal': normalized_goal_xys,
                 'grid_goal': normalized_goal_id
