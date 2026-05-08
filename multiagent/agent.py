@@ -140,7 +140,8 @@ class NavCMTAgent:
         self.vision_model = Darknet(self.args.darknet_model_file, 224).cuda()
 
         try:
-            print(f"Loading darknet weights from {self.args.darknet_weight_file}")
+            if self.default_gpu:
+                print(f"Loading darknet weights from {self.args.darknet_weight_file}")
             new_state = torch.load(self.args.darknet_weight_file, map_location='cuda')
             
             # 兼容字典格式和直接保存权重的格式
@@ -154,10 +155,12 @@ class NavCMTAgent:
             state_dict = {k: v for k, v in weights.items() if k in state and state[k].shape == v.shape}
             state.update(state_dict)
             self.vision_model.load_state_dict(state)
-            print("Vision model initialized with Darknet weights.")
+            if self.default_gpu:
+                print("Vision model initialized with Darknet weights.")
         except Exception as e:
-            print(f"Warning: Failed to load vision_model weights: {e}")
-            print("Proceeding with randomly initialized weights or will be overwritten by checkpoint.")
+            if self.default_gpu:
+                print(f"Warning: Failed to load vision_model weights: {e}")
+                print("Proceeding with randomly initialized weights or will be overwritten by checkpoint.")
 
 
 
@@ -304,7 +307,7 @@ class NavCMTAgent:
                            prefix='Progress:', suffix='%s (%d/%d)' % (
                     timeSince(start, float(idx) / tot), idx, tot), bar_length=80)
 
-    def train(self, loader, n_epochs, feedback='student', nss_w_weighting=1, **kwargs):
+    def train(self, loader, n_epochs, feedback='student', nss_w_weighting=1, max_batches_per_epoch=None, **kwargs):
         ''' Train for a given number of epochs '''
         self.feedback = feedback
 
@@ -313,12 +316,28 @@ class NavCMTAgent:
         self.vision_model.train()
 
         self.losses = []
+        dataset_batches = int(math.ceil(float(loader.dataset.size()) / float(self.env.batch_size)))
+        if dist.is_available() and dist.is_initialized():
+            dataset_batches_tensor = torch.tensor([dataset_batches], device='cuda', dtype=torch.long)
+            dist.all_reduce(dataset_batches_tensor, op=dist.ReduceOp.MIN)
+            dataset_batches = int(dataset_batches_tensor.item())
+        if max_batches_per_epoch is not None and max_batches_per_epoch <= 0:
+            max_batches_per_epoch = None
+        if max_batches_per_epoch is None:
+            epoch_progress_total = dataset_batches
+        else:
+            epoch_progress_total = min(dataset_batches, int(max_batches_per_epoch))
+        progress_total = max(int(n_epochs) * epoch_progress_total, 1)
+        progress_idx = 0
+        start = time.time()
         for epoch in range(1, n_epochs + 1):
             idx = 0
-            start = time.time()
             # print('?')
             for _, l in enumerate(loader):
+                if idx >= epoch_progress_total:
+                    break
                 idx += 1
+                progress_idx += 1
                 # if idx >= 100:
                 #     break
                 # train_loop_start_time = time.time()
@@ -356,11 +375,11 @@ class NavCMTAgent:
                 # print("---------- One iter takes %s seconds ---" % (time.time() - train_loop_start_time))
 
                 if self.default_gpu:
-                    tot = n_epochs * loader.dataset.size() / self.env.batch_size
+                    tot = progress_total
                     # print('is')
-                    print_progress(idx, tot,
+                    print_progress(progress_idx, tot,
                                    prefix='Progress:', suffix='%s (%d/%d)' % (
-                            timeSince(start, float(idx) / tot), idx, tot), bar_length=80)
+                            timeSince(start, min(float(progress_idx) / float(tot), 1.0)), progress_idx, tot), bar_length=80)
 
     def zero_grad(self):
         self.loss = 0.
@@ -536,7 +555,40 @@ class NavCMTAgent:
                 current_t=t,                      # 【新增】告诉模型现在是第几步
                 time_steps=input['time_steps']    # 【新增】告诉模型过去特征的时间标签
             )
+            update_only_topo_stat_keys = {
+                'create_place_nodes_count',
+                'merge_place_nodes_count',
+                'update_existing_place_nodes_count',
+                'step_new_place_nodes',
+                'step_merged_place_nodes',
+                'step_updated_place_nodes',
+                'goal_relevance',
+                'goal_relevance_score',
+                'created_goal_relevance',
+                'updated_goal_relevance',
+                'merged_goal_relevance',
+                'goal_relevance_of_created_nodes',
+                'goal_relevance_of_updated_nodes',
+                'goal_relevance_of_merged_nodes',
+                'create_score',
+                'visual_change',
+                'novelty_score',
+                'best_association_score',
+                'base_create',
+                'goal_boost_create',
+                'final_create',
+                'spatial_create',
+                'visual_create',
+                'turn_create',
+                'merge_unreliable',
+                'event_debug_create',
+                'create_rate',
+                'update_rate',
+                'merge_rate',
+            }
             for key, value in compression_stats.items():
+                if self.args.enable_topo_memory and key in update_only_topo_stat_keys:
+                    continue
                 self.logs[key].append(value)
 
             if (
@@ -580,7 +632,9 @@ class NavCMTAgent:
             for batch_idx, ob in enumerate(obs):
                 input['topo_landmarks'][batch_idx].append(ob.get('topo_landmarks', []))
             if self.args.enable_topo_memory and self.topo_memory_manager is not None:
-                positive_decay_rate = F.softplus(self.vln_model_without_ddp.decay_rate.detach())
+                positive_decay_rate = None
+                if self.args.use_time_decay:
+                    positive_decay_rate = F.softplus(self.vln_model_without_ddp.decay_rate.detach())
                 for batch_idx, ob in enumerate(obs):
                     if ended[batch_idx]:
                         continue
@@ -678,9 +732,9 @@ class NavCMTAgent:
                     # ml_loss += progress_loss
 
                     # print(ml_loss)
-                    if direction_loss != direction_loss:  # debug for nan loss
+                    if self.default_gpu and direction_loss != direction_loss:  # debug for nan loss
                         print('0', direction_loss)
-                    if progress_loss != progress_loss:  # debug for nan loss
+                    if self.default_gpu and progress_loss != progress_loss:  # debug for nan loss
                         print('0', progress_loss)
                 # print(at_direction, gt_direction, ml_loss)
                 target_predict_loss += self.criterion(pred_logits, gt_target.unsqueeze(1).cuda())
@@ -925,10 +979,12 @@ class NavCMTAgent:
             model_keys = set(state.keys())
             load_keys = set(states[name]['state_dict'].keys())
             if model_keys == load_keys:
-                print("NOTICE: LOADing ALL KEYS IN THE ", name)
+                if self.default_gpu:
+                    print("NOTICE: LOADing ALL KEYS IN THE ", name)
                 state_dict = states[name]['state_dict']
             else:
-                print("NOTICE: DIFFERENT KEYS IN THE ", name)
+                if self.default_gpu:
+                    print("NOTICE: DIFFERENT KEYS IN THE ", name)
                 # if not list(model_keys)[0].startswith('module.') and list(load_keys)[0].startswith('module.'):
                 #     state_dict = {k.replace('module.', ''): v for k, v in state_dict.items()}
                 state_dict = {k: v for k, v in states[name]['state_dict'].items() if k in model_keys and v.shape == state[k].shape}
@@ -937,14 +993,17 @@ class NavCMTAgent:
             if self.args.resume_optimizer:
                 try:
                     optimizer.load_state_dict(states[name]['optimizer'])
-                    print(f"[INFO] Loaded optimizer state for {name}.")
+                    if self.default_gpu:
+                        print(f"[INFO] Loaded optimizer state for {name}.")
                 except ValueError as e:
-                    print(f"[WARN] Skip loading optimizer state for {name}: {e}")
+                    if self.default_gpu:
+                        print(f"[WARN] Skip loading optimizer state for {name}: {e}")
 
             def count_parameters(mo):
                 return sum(p.numel() for p in mo.parameters() if p.requires_grad)
 
-            print('Model parameters: ', count_parameters(model))
+            if self.default_gpu:
+                print('Model parameters: ', count_parameters(model))
 
         all_tuple = [("lang_model", self.lang_model_without_ddp, self.lang_model_optimizer),
                      ("vision_model", self.vision_model_without_ddp, self.vision_model_optimizer),

@@ -105,6 +105,7 @@ def parse_args():
     parser.add_argument('--spatial_dist_threshold', type=int, default=1)
     parser.add_argument('--spatial_far_coarse_size', type=int, default=2)
     parser.add_argument('--use_topo_memory', action='store_true', default=False)
+    add_bool_flag('use_time_decay', default=False)
     add_bool_flag('enable_topo_memory', default=False)
     add_bool_flag('persistent_topo_memory', default=False)
     add_bool_flag('topo_seed_first_observation', default=False)
@@ -127,7 +128,15 @@ def parse_args():
     parser.add_argument('--vis_weight', type=float, default=0.35)
     parser.add_argument('--goal_weight', type=float, default=0.20)
     parser.add_argument('--sem_weight', type=float, default=0.10)
-    parser.add_argument('--global_retrieve_k', type=int, default=16)
+    parser.add_argument('--create_novelty_weight', type=float, default=0.40)
+    parser.add_argument('--create_goal_weight', type=float, default=0.40)
+    parser.add_argument('--create_visual_weight', type=float, default=0.20)
+    parser.add_argument('--goal_create_high_threshold', type=float, default=0.25)
+    parser.add_argument('--goal_visual_change_low_threshold', type=float, default=0.18)
+    parser.add_argument('--retrieve_goal_weight', type=float, default=0.50)
+    parser.add_argument('--retrieve_visual_weight', type=float, default=0.30)
+    parser.add_argument('--retrieve_visit_weight', type=float, default=0.20)
+    parser.add_argument('--global_retrieve_k', type=int, default=8)
     parser.add_argument('--local_hops', type=int, default=1)
     parser.add_argument('--patch_bank_size', type=int, default=3)
     add_bool_flag('use_event_nodes', default=False)
@@ -205,6 +214,12 @@ def parse_args():
     parser.add_argument('--batch_size', type=int, default=8)
     parser.add_argument('--epochs', type=int, default=20)
     parser.add_argument('--iters', type=int, default=200000)
+    parser.add_argument(
+        '--max_train_batches_per_epoch',
+        type=int,
+        default=-1,
+        help='Debug/sanity-run cap for train batches in each outer epoch; <=0 keeps full training.',
+    )
     parser.add_argument('--checkpoint', type=str, default=None)
     add_bool_flag('resume_optimizer', default=False)
     parser.add_argument('--save_every', type=int, default=10)

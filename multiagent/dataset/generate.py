@@ -15,9 +15,10 @@ def generate_episodes_from_mturk_trajectories(
     max_steps=500,
     teacher_type: TeacherType = 'lookahead',
     teacher_params: TeacherParams = LookaheadTeacherParams(lookahead=1),
+    disable_tqdm: bool = False,
 ) -> List[Episode]:
     episodes = []
-    for mturk_traj in tqdm(mturk_trajectories, desc='generating episodes'):
+    for mturk_traj in tqdm(mturk_trajectories, desc='generating episodes', disable=disable_tqdm):
 
         if mturk_traj.dist_marker_to_target > max_dist_marker_to_target:
             continue

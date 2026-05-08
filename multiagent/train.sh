@@ -1,7 +1,7 @@
 #!/bin/bash
 set -euo pipefail
 
-ngpus=1
+ngpus=${NGPUS:-1}
 seed=0
 
 BASE_FLAGS="--world_size ${ngpus} \
@@ -32,9 +32,11 @@ NNODES=${NNODES:-1}
 NODE_RANK=${NODE_RANK:-0}
 PORT=${PORT:-29536}
 MASTER_ADDR=${MASTER_ADDR:-127.0.0.1}
+
 echo "Running with flags:"
 echo "${flag}"
-CUDA_VISIBLE_DEVICES='0' python -m torch.distributed.run \
+
+CUDA_VISIBLE_DEVICES=${CUDA_VISIBLE_DEVICES:-0} python -m torch.distributed.run \
     --nnodes=$NNODES \
     --node_rank=$NODE_RANK \
     --master_addr=$MASTER_ADDR \

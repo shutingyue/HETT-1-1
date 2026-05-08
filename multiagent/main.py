@@ -29,6 +29,15 @@ from torch.utils.data.distributed import DistributedSampler
 from torch.utils.data.dataloader import DataLoader
 
 
+def is_distributed():
+    return dist.is_available() and dist.is_initialized()
+
+
+def distributed_barrier():
+    if is_distributed():
+        dist.barrier()
+
+
 def format_compression_logs(logs):
     keys = [
         'tokens_before',
@@ -43,6 +52,119 @@ def format_compression_logs(logs):
         mean_value = sum(logs[key]) / max(len(logs[key]), 1)
         values.append((key, mean_value))
     return "compression " + " ".join(f"{key} {value:.4f}" for key, value in values)
+
+
+def _mean_log_value(logs, key, default=0.0):
+    values = []
+    for value in logs.get(key, []):
+        try:
+            value = float(value)
+        except (TypeError, ValueError):
+            continue
+        if np.isfinite(value):
+            values.append(value)
+    if not values:
+        return default
+    return sum(values) / max(len(values), 1)
+
+
+def _min_log_value(logs, key, default=0.0):
+    values = []
+    for value in logs.get(key, []):
+        try:
+            value = float(value)
+        except (TypeError, ValueError):
+            continue
+        if np.isfinite(value):
+            values.append(value)
+    return min(values) if values else default
+
+
+def _max_log_value(logs, key, default=0.0):
+    values = []
+    for value in logs.get(key, []):
+        try:
+            value = float(value)
+        except (TypeError, ValueError):
+            continue
+        if np.isfinite(value):
+            values.append(value)
+    return max(values) if values else default
+
+
+def format_topo_logs(logs):
+    if not logs.get('avg_place_nodes', []) and not logs.get('total_place_nodes', []):
+        return "[topo_stats] disabled"
+    avg_place_nodes = _mean_log_value(logs, 'avg_place_nodes', _mean_log_value(logs, 'total_place_nodes'))
+    max_place_nodes = _mean_log_value(logs, 'max_place_nodes_used', avg_place_nodes)
+    min_place_nodes = _mean_log_value(logs, 'min_place_nodes_used', avg_place_nodes)
+    create_count = _mean_log_value(logs, 'create_place_nodes_count', _mean_log_value(logs, 'step_new_place_nodes'))
+    update_count = _mean_log_value(logs, 'update_existing_place_nodes_count', _mean_log_value(logs, 'step_updated_place_nodes'))
+    merge_count = _mean_log_value(logs, 'merge_place_nodes_count', _mean_log_value(logs, 'step_merged_place_nodes'))
+    op_count = max(create_count + update_count, 1e-6)
+    create_rate = _mean_log_value(logs, 'create_rate', create_count / op_count)
+    update_rate = _mean_log_value(logs, 'update_rate', update_count / op_count)
+    merge_rate = _mean_log_value(logs, 'merge_rate', merge_count / op_count)
+    global_k = _mean_log_value(logs, 'global_retrieved_nodes')
+    retrieval_coverage = _mean_log_value(logs, 'retrieval_coverage', global_k / max(avg_place_nodes, 1.0))
+    goal_rel_avg = _mean_log_value(logs, 'goal_relevance', _mean_log_value(logs, 'avg_goal_relevance'))
+    goal_rel_min = _min_log_value(logs, 'goal_relevance', goal_rel_avg)
+    goal_rel_max = _max_log_value(logs, 'goal_relevance', _mean_log_value(logs, 'max_goal_relevance', goal_rel_avg))
+    visual_change_avg = _mean_log_value(logs, 'visual_change')
+    visual_change_min = _min_log_value(logs, 'visual_change', visual_change_avg)
+    visual_change_max = _max_log_value(logs, 'visual_change', visual_change_avg)
+    created_goal = _mean_log_value(
+        logs,
+        'created_goal_relevance',
+        _mean_log_value(logs, 'goal_relevance_of_created_nodes', float('nan')),
+    )
+    updated_goal = _mean_log_value(
+        logs,
+        'updated_goal_relevance',
+        _mean_log_value(logs, 'goal_relevance_of_updated_nodes', float('nan')),
+    )
+    merged_goal = _mean_log_value(
+        logs,
+        'merged_goal_relevance',
+        _mean_log_value(logs, 'goal_relevance_of_merged_nodes', float('nan')),
+    )
+    return (
+        "[topo_stats] place_nodes avg={:.2f} min={:.2f} max={:.2f} sat={:.3f} "
+        "create={:.2f} update={:.2f} merge={:.2f} create_rate={:.3f} update_rate={:.3f} merge_rate={:.3f} "
+        "global_k={:.2f} local_k={:.2f} coverage={:.3f} active_valid={:.3f} empty={:.3f} "
+        "goal_rel avg={:.4f} range=[{:.4f},{:.4f}] created_goal={:.4f} updated_goal={:.4f} merged_goal={:.4f} "
+        "visual_change avg={:.4f} range=[{:.4f},{:.4f}] "
+        "token_norm topo={:.4f}+/-{:.4f} global={:.4f} local={:.4f}"
+    ).format(
+        avg_place_nodes,
+        min_place_nodes,
+        max_place_nodes,
+        _mean_log_value(logs, 'node_saturation_ratio'),
+        create_count,
+        update_count,
+        merge_count,
+        create_rate,
+        update_rate,
+        merge_rate,
+        global_k,
+        _mean_log_value(logs, 'local_retrieved_nodes'),
+        retrieval_coverage,
+        _mean_log_value(logs, 'active_node_valid_ratio'),
+        _mean_log_value(logs, 'empty_retrieval_ratio'),
+        goal_rel_avg,
+        goal_rel_min,
+        goal_rel_max,
+        created_goal,
+        updated_goal,
+        merged_goal,
+        visual_change_avg,
+        visual_change_min,
+        visual_change_max,
+        _mean_log_value(logs, 'topo_token_norm_mean'),
+        _mean_log_value(logs, 'topo_token_norm_std'),
+        _mean_log_value(logs, 'global_token_norm_mean'),
+        _mean_log_value(logs, 'local_token_norm_mean'),
+    )
 
 
 def get_tokenizer(args):
@@ -69,16 +191,17 @@ def build_train_dataset(args, rank=0):
     # val_env_names = ['val_seen',]  # 'test_unseen'
 
     val_envs = {}
-    for split in val_env_names:
-        val_env = dataset_class(
-            split, args,
-            batch_size=args.batch_size,
-            seed=args.seed + rank,
-            rank=rank,
-            world_size=1
-        )
+    if rank == 0:
+        for split in val_env_names:
+            val_env = dataset_class(
+                split, args,
+                batch_size=args.batch_size,
+                seed=args.seed + rank,
+                rank=rank,
+                world_size=1
+            )
 
-        val_envs[split] = val_env
+            val_envs[split] = val_env
 
     return train_env, val_envs
 
@@ -92,16 +215,17 @@ def build_val_dataset(args, rank=0):
     # val_env_names = ['visualization' ]  # 'test_unseen'
 
     val_envs = {}
-    for split in val_env_names:
-        val_env = dataset_class(
-            split, args,
-            batch_size=args.batch_size,
-            seed=args.seed + rank,
-            rank=rank,
-            world_size=1
-        )
+    if rank == 0:
+        for split in val_env_names:
+            val_env = dataset_class(
+                split, args,
+                batch_size=args.batch_size,
+                seed=args.seed + rank,
+                rank=rank,
+                world_size=1
+            )
 
-        val_envs[split] = val_env
+            val_envs[split] = val_env
 
     return val_envs
 
@@ -114,16 +238,17 @@ def build_vis_dataset(args, rank=0):
     val_env_names = ['visualization' ]  # 'test_unseen'
 
     val_envs = {}
-    for split in val_env_names:
-        val_env = dataset_class(
-            split, args,
-            batch_size=args.batch_size,
-            seed=args.seed + rank,
-            rank=rank,
-            world_size=1
-        )
+    if rank == 0:
+        for split in val_env_names:
+            val_env = dataset_class(
+                split, args,
+                batch_size=args.batch_size,
+                seed=args.seed + rank,
+                rank=rank,
+                world_size=1
+            )
 
-        val_envs[split] = val_env
+            val_envs[split] = val_env
 
     return val_envs
 
@@ -174,6 +299,7 @@ def train(args, train_env, val_envs, rank=-1):
                         best_val[env_name]['sr'] = score_summary['sr']
                         best_val[env_name]['state'] = 'Epoch %d %s' % (start_epoch, loss_str)
             write_to_record_file(loss_str, record_file)
+        distributed_barrier()
 
     torch.cuda.empty_cache()
     agent_class = NavCMTAgent
@@ -214,11 +340,25 @@ def train(args, train_env, val_envs, rank=-1):
         loader = DataLoader(agent.env, batch_size=1)
         # print(loader.dataset.size())
 
-        # Train for 2 epochs before evaluate again
-        agent.train(loader, args.log_every, feedback=args.feedback,
-                    nss_w_weighting=1)  # nss_w_weighting = max(0, (args.iters/2 - idx)/ (args.iters/2)))
+        max_train_batches = (
+            int(args.max_train_batches_per_epoch)
+            if getattr(args, 'max_train_batches_per_epoch', -1) is not None
+            and int(args.max_train_batches_per_epoch) > 0
+            else None
+        )
+        train_passes = 1 if max_train_batches is not None else args.log_every
+
+        # Train before evaluating this outer epoch. In short-run mode the batch cap is
+        # for this outer epoch, so avoid multiplying it by the legacy log_every passes.
+        agent.train(loader, train_passes, feedback=args.feedback,
+                    nss_w_weighting=1,
+                    max_batches_per_epoch=max_train_batches)  # nss_w_weighting = max(0, (args.iters/2 - idx)/ (args.iters/2)))
+
+        distributed_barrier()
 
         if default_gpu:
+            should_eval = (idx % max(int(args.eval_every), 1)) == 0
+            should_save = (idx % max(int(args.save_every), 1)) == 0
             ml_loss = sum(agent.logs['IL_loss']) / max(len(agent.logs['IL_loss']), 1)
 
             direction_loss = sum(agent.logs['direction_loss']) / max(len(agent.logs['direction_loss']), 1)
@@ -243,54 +383,62 @@ def train(args, train_env, val_envs, rank=-1):
                 record_file
             )
             write_to_record_file("\n%s" % format_compression_logs(agent.logs), record_file)
+            if args.use_topo_memory:
+                write_to_record_file("\n%s" % format_topo_logs(agent.logs), record_file)
+
+            if should_save or should_eval:
+                agent.save(idx, os.path.join(GOAL_PREDICTOR_CHECKPOINT_DIR, "latest"))
 
             # Run validation
-            loss_str = "\nepoch {}".format(idx)
+            if should_eval:
+                loss_str = "\nepoch {}".format(idx)
 
-            agent.save(idx, os.path.join(GOAL_PREDICTOR_CHECKPOINT_DIR, "latest"))
-            agent_class_eval = NavCMTAgent
-            agent_eval = agent_class_eval(args, rank=rank, allow_ngpus=False)
-            print("Loaded the listener model at epoch %d from %s" % \
-                  (agent_eval.load(os.path.join(GOAL_PREDICTOR_CHECKPOINT_DIR, "latest")),
-                   os.path.join(GOAL_PREDICTOR_CHECKPOINT_DIR, "latest")))
-            for env_name, env in val_envs.items():
-                agent_eval.logs = defaultdict(list)
-                agent_eval.env = env
-                loader = DataLoader(env, batch_size=1)
-                # Get validation distance from goal under test evaluation conditions
-                agent_eval.test(loader, feedback='student')
-                pred_results = agent_eval.get_results()
+                agent_class_eval = NavCMTAgent
+                agent_eval = agent_class_eval(args, rank=rank, allow_ngpus=False)
+                print("Loaded the listener model at epoch %d from %s" % \
+                      (agent_eval.load(os.path.join(GOAL_PREDICTOR_CHECKPOINT_DIR, "latest")),
+                       os.path.join(GOAL_PREDICTOR_CHECKPOINT_DIR, "latest")))
+                for env_name, env in val_envs.items():
+                    agent_eval.logs = defaultdict(list)
+                    agent_eval.env = env
+                    loader = DataLoader(env, batch_size=1)
+                    # Get validation distance from goal under test evaluation conditions
+                    agent_eval.test(loader, feedback='student')
+                    pred_results = agent_eval.get_results()
 
-                score_summary, result = env.eval_metrics(pred_results)
-                stage1_step = sum(agent_eval.logs['stage1_step']) / max(len(agent_eval.logs['stage1_step']), 1)
-                stage2_step = sum(agent_eval.logs['stage2_step']) / max(len(agent_eval.logs['stage2_step']), 1)
-                stage2_rotate = sum(agent_eval.logs['stage2_rotate']) / max(len(agent_eval.logs['stage2_rotate']), 1)
+                    score_summary, result = env.eval_metrics(pred_results)
+                    stage1_step = sum(agent_eval.logs['stage1_step']) / max(len(agent_eval.logs['stage1_step']), 1)
+                    stage2_step = sum(agent_eval.logs['stage2_step']) / max(len(agent_eval.logs['stage2_step']), 1)
+                    stage2_rotate = sum(agent_eval.logs['stage2_rotate']) / max(len(agent_eval.logs['stage2_rotate']), 1)
+
+                    write_to_record_file(
+                        "\nstage %.4f %.4f %.4f" % (
+                            stage1_step, stage2_step, stage2_rotate),
+                        record_file
+                    )
+                    write_to_record_file("\n%s" % format_compression_logs(agent_eval.logs), record_file)
+                    if args.use_topo_memory:
+                        write_to_record_file("\n%s" % format_topo_logs(agent_eval.logs), record_file)
+                    loss_str += "\n%s " % env_name
+                    for metric, val in score_summary.items():
+                        loss_str += ', %s: %.2f' % (metric, val)
+                        # writer.add_scalar('%s/%s' % (metric, env_name), score_summary[metric], iter)
+                    if env_name in best_val:
+                        if score_summary['sr'] >= best_val[env_name]['sr']:
+                            best_val[env_name]['sr'] = score_summary['sr']
+                            best_val[env_name]['state'] = 'Epoch %d %s' % (idx, loss_str)
+                            agent_eval.save(idx, os.path.join(GOAL_PREDICTOR_CHECKPOINT_DIR, "best_%s" % (env_name)))
 
                 write_to_record_file(
-                    "\nstage %.4f %.4f %.4f" % (
-                        stage1_step, stage2_step, stage2_rotate),
+                    ('\n%s (%d %d%%) %s' % (
+                        timeSince(start, float(idx + 1) / args.epochs), idx + 1, float(idx + 1) / args.epochs * 100,
+                        loss_str)),
                     record_file
                 )
-                write_to_record_file("\n%s" % format_compression_logs(agent_eval.logs), record_file)
-                loss_str += "\n%s " % env_name
-                for metric, val in score_summary.items():
-                    loss_str += ', %s: %.2f' % (metric, val)
-                    # writer.add_scalar('%s/%s' % (metric, env_name), score_summary[metric], iter)
-                if env_name in best_val:
-                    if score_summary['sr'] >= best_val[env_name]['sr']:
-                        best_val[env_name]['sr'] = score_summary['sr']
-                        best_val[env_name]['state'] = 'Epoch %d %s' % (idx, loss_str)
-                        agent_eval.save(idx, os.path.join(GOAL_PREDICTOR_CHECKPOINT_DIR, "best_%s" % (env_name)))
-
-            write_to_record_file(
-                ('\n%s (%d %d%%) %s' % (
-                    timeSince(start, float(idx + 1) / args.epochs), idx + 1, float(idx + 1) / args.epochs * 100,
-                    loss_str)),
-                record_file
-            )
-            write_to_record_file("BEST RESULT TILL NOW", record_file)
-            for env_name in best_val:
-                write_to_record_file(env_name + ' | ' + best_val[env_name]['state'], record_file)
+                write_to_record_file("BEST RESULT TILL NOW", record_file)
+                for env_name in best_val:
+                    write_to_record_file(env_name + ' | ' + best_val[env_name]['state'], record_file)
+        distributed_barrier()
         torch.cuda.empty_cache()
 
 
@@ -328,6 +476,8 @@ def valid(args, val_envs, rank=-1):
                 record_file
             )
             write_to_record_file("\n%s" % format_compression_logs(agent_eval.logs), record_file)
+            if args.use_topo_memory:
+                write_to_record_file("\n%s" % format_topo_logs(agent_eval.logs), record_file)
             loss_str += "\n%s " % env_name
             for metric, val in score_summary.items():
                 loss_str += ', %s: %.2f' % (metric, val)

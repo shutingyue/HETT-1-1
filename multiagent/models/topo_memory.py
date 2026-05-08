@@ -273,6 +273,9 @@ class TopoMemoryGraph:
         self._step_merged_nodes = 0
         self._step_landmark_attachments = 0
         self._step_updated_nodes = 0
+        self._step_created_goal_relevance: List[float] = []
+        self._step_updated_goal_relevance: List[float] = []
+        self._step_merged_goal_relevance: List[float] = []
         self._last_update_stats: Dict[str, float] = {}
 
     def start_episode(
@@ -381,6 +384,83 @@ class TopoMemoryGraph:
 
         return self._normalize_feature_matrix(token, name=name)
 
+    def _clamp01_tensor(self, value: torch.Tensor) -> torch.Tensor:
+        """Clamp a scalar tensor into a score-like [0, 1] range."""
+
+        return value.clamp(0.0, 1.0)
+
+    def _goal_relevance_score(self, goal_relevance: torch.Tensor) -> torch.Tensor:
+        """Map cosine-style instruction relevance from [-1, 1] to [0, 1]."""
+
+        return self._clamp01_tensor(0.5 * (goal_relevance + 1.0))
+
+    def _normalized_novelty(self, novelty: torch.Tensor) -> torch.Tensor:
+        """Use bounded visual novelty in create/retrieval bookkeeping."""
+
+        return self._clamp01_tensor(novelty)
+
+    def _active_visual_change(self, feature_t: torch.Tensor) -> torch.Tensor:
+        """Measure current observation change relative to the active place node."""
+
+        if not self.place_nodes or self._active_place_id is None:
+            return feature_t.new_tensor(1.0)
+        active_place = self._place_by_id(self._active_place_id)
+        visual_change = 1.0 - safe_cosine_similarity(
+            feature_t.unsqueeze(0),
+            active_place.visual_prototype().unsqueeze(0),
+        ).squeeze(0)
+        return self._clamp01_tensor(visual_change)
+
+    def _weighted_unit_score(self, terms: Sequence[tuple[float, torch.Tensor]]) -> torch.Tensor:
+        """Combine bounded score terms while tolerating zero/negative user weights."""
+
+        total_weight = sum(max(float(weight), 0.0) for weight, _ in terms)
+        if total_weight <= 1e-6:
+            return terms[0][1].new_tensor(0.0)
+        score = terms[0][1].new_tensor(0.0)
+        for weight, value in terms:
+            score = score + max(float(weight), 0.0) * value
+        return score / total_weight
+
+    def _create_score(
+        self,
+        novelty: torch.Tensor,
+        goal_relevance: torch.Tensor,
+        visual_change: torch.Tensor,
+    ) -> torch.Tensor:
+        """Goal-aware create score for turning observations into meaningful places."""
+
+        # TODO: add a continuous turn_signal term here once heading confidence is stable
+        # enough to be used as a score instead of a boolean event trigger.
+        return self._weighted_unit_score(
+            (
+                (getattr(self.args, "create_novelty_weight", 0.40), self._normalized_novelty(novelty)),
+                (getattr(self.args, "create_goal_weight", 0.40), self._goal_relevance_score(goal_relevance)),
+                (getattr(self.args, "create_visual_weight", 0.20), self._clamp01_tensor(visual_change)),
+            )
+        )
+
+    def _mean_float(self, values: Sequence[float]) -> float:
+        """Mean helper for sparse debug stats."""
+
+        return float(sum(values) / max(len(values), 1)) if values else 0.0
+
+    def _mean_float_or_nan(self, values: Sequence[float]) -> float:
+        """Mean helper for event-conditioned debug stats."""
+
+        return float(sum(values) / len(values)) if values else float("nan")
+
+    def _token_norm_stats(self, tokens: torch.Tensor) -> Dict[str, float]:
+        """Return norm mean/std for a [N, D] token matrix."""
+
+        if tokens.numel() == 0 or tokens.shape[0] == 0:
+            return {"mean": 0.0, "std": 0.0}
+        norms = tokens.norm(dim=-1)
+        return {
+            "mean": float(norms.mean().item()),
+            "std": float(norms.std(unbiased=False).item()) if norms.numel() > 1 else 0.0,
+        }
+
     def _proposal_flags(
         self,
         xy_t: torch.Tensor,
@@ -482,6 +562,7 @@ class TopoMemoryGraph:
             )
         )
         self._step_new_nodes += 1
+        self._step_created_goal_relevance.append(float(goal_relevance.item()))
         return place_id
 
     def _update_place_node(
@@ -516,6 +597,7 @@ class TopoMemoryGraph:
         if len(place.recent_patch_bank) > int(self.args.patch_bank_size):
             place.recent_patch_bank.pop(0)
         self._step_updated_nodes += 1
+        self._step_updated_goal_relevance.append(float(goal_relevance.item()))
         if step_id - previous_last_seen > 1 and self._active_place_id is not None:
             self.reobservation_edges.append((self._active_place_id, place_id))
         return place_id
@@ -638,8 +720,15 @@ class TopoMemoryGraph:
                 )
             similarity.fill_diagonal_(0.0)
             redundancy = similarity / (1.0 + distance)
+            max_visit = max(float(node.visit_count) for node in self.place_nodes)
             importance = torch.tensor(
-                [node.visit_count + node.goal_relevance for node in self.place_nodes],
+                [
+                    0.50 * max(0.0, min(1.0, 0.5 * (node.goal_relevance + 1.0)))
+                    + 0.30 * (float(node.visit_count) / max(max_visit, 1.0))
+                    + 0.15 * max(0.0, min(1.0, float(node.novelty_score)))
+                    + (0.05 if node.node_id == self._active_place_id else 0.0)
+                    for node in self.place_nodes
+                ],
                 device=features.device,
                 dtype=features.dtype,
             )
@@ -681,6 +770,7 @@ class TopoMemoryGraph:
                 self._active_place_id = keep_id
             del self.place_nodes[remove_slot]
             self._step_merged_nodes += 1
+            self._step_merged_goal_relevance.append(float(remove_node.goal_relevance))
 
     def _refresh_spatial_edges(self) -> None:
         """Refresh sparse spatial edges after an incremental update."""
@@ -702,7 +792,7 @@ class TopoMemoryGraph:
         xy: Optional[torch.Tensor],
         landmark_info: Sequence[dict],
         step_id: int,
-        time_decay_rate: torch.Tensor,
+        time_decay_rate: Optional[torch.Tensor],
     ) -> Dict[str, float]:
         """Incrementally update the persistent graph with one new observation."""
 
@@ -711,6 +801,9 @@ class TopoMemoryGraph:
         self._step_merged_nodes = 0
         self._step_landmark_attachments = 0
         self._step_updated_nodes = 0
+        self._step_created_goal_relevance = []
+        self._step_updated_goal_relevance = []
+        self._step_merged_goal_relevance = []
 
         base_xy = self.base_positions[int(cell_id)]
         if xy is not None and torch.isfinite(xy).all():
@@ -719,8 +812,11 @@ class TopoMemoryGraph:
             xy_t = base_xy
 
         feature_t = observation_feature.to(self.instruction_feat.dtype)
-        decay = torch.exp(-time_decay_rate * feature_t.new_tensor(0.0))
-        feature_t = feature_t * decay
+        # Time decay is fully disabled when `time_decay_rate` is None, so the graph update
+        # uses the raw observation feature with no learned temporal scaling side effect.
+        if time_decay_rate is not None:
+            decay = torch.exp(-time_decay_rate * feature_t.new_tensor(0.0))
+            feature_t = feature_t * decay
         goal_relevance = safe_cosine_similarity(
             feature_t.unsqueeze(0),
             self.instruction_feat.unsqueeze(0),
@@ -731,6 +827,10 @@ class TopoMemoryGraph:
             novelty = 1.0 - safe_cosine_similarity(feature_t.unsqueeze(0), place_visuals).max()
         else:
             novelty = feature_t.new_tensor(1.0)
+        novelty_score = self._normalized_novelty(novelty)
+        goal_relevance_score = self._goal_relevance_score(goal_relevance)
+        visual_change = self._active_visual_change(feature_t)
+        create_score = self._create_score(novelty, goal_relevance, visual_change)
 
         heading_vec = feature_t.new_zeros(2)
         heading_change_deg = 0.0
@@ -762,7 +862,18 @@ class TopoMemoryGraph:
             landmark_names=landmark_names,
         )
 
+        best_assoc = 0.0
+        base_create = not association_scores
+        goal_boost_create = False
+        spatial_create = False
+        visual_create = False
+        turn_create = False
+        merge_unreliable = False
+        event_debug_create = False
+        create_new = False
+
         if not association_scores:
+            create_new = True
             selected_place_id = self._create_place_node(
                 xy_t,
                 heading_vec,
@@ -774,7 +885,39 @@ class TopoMemoryGraph:
             )
         else:
             best_place_id, best_score_tensor = max(association_scores, key=lambda item: float(item[1].item()))
-            create_new = any(proposal_flags.values()) or float(best_score_tensor.item()) < float(self.args.topo_merge_sim_threshold)
+            best_assoc = float(best_score_tensor.item())
+            raw_goal_relevance = float(goal_relevance.item())
+            novelty_value = float(novelty_score.item())
+            visual_change_value = float(visual_change.item())
+            create_score_value = float(create_score.item())
+            spatial_create = (
+                bool(proposal_flags.get("spatial_shift", False))
+                or bool(proposal_flags.get("merge_radius", False))
+            )
+            visual_create = (
+                bool(proposal_flags.get("visual_shift", False))
+                or bool(proposal_flags.get("novelty", False))
+            )
+            turn_create = bool(proposal_flags.get("turn_event", False))
+            merge_unreliable = best_assoc < float(self.args.topo_merge_sim_threshold)
+            base_create = spatial_create or visual_create or turn_create or merge_unreliable
+
+            goal_create_high_threshold = float(getattr(self.args, "goal_create_high_threshold", 0.25))
+            visual_change_low_threshold = float(
+                getattr(self.args, "goal_visual_change_low_threshold", 0.18)
+            )
+            goal_boost_create = (
+                raw_goal_relevance > goal_create_high_threshold
+                and visual_change_value > visual_change_low_threshold
+            )
+            create_new = base_create or goal_boost_create
+
+            # Landmark/relevance jump events can still be recorded below, but they no longer
+            # suppress normal place-only growth or replace the base geometry/visual create path.
+            event_debug_create = (
+                bool(proposal_flags.get("turn_event", False))
+                or bool(proposal_flags.get("relevance_jump", False))
+            )
             if create_new:
                 selected_place_id = self._create_place_node(
                     xy_t,
@@ -816,6 +959,7 @@ class TopoMemoryGraph:
         self._prev_prev_xy = self._prev_xy
         self._prev_xy = xy_t
 
+        update_denominator = max(float(self._step_new_nodes + self._step_updated_nodes), 1.0)
         self._last_update_stats = {
             "active_place_id": float(selected_place_id),
             "step_new_place_nodes": float(self._step_new_nodes),
@@ -829,6 +973,32 @@ class TopoMemoryGraph:
             "total_spatial_edges": float(len(self.spatial_edges)),
             "total_semantic_edges": float(len(self.semantic_edges)),
             "total_reobservation_edges": float(len(self.reobservation_edges)),
+            "create_place_nodes_count": float(self._step_new_nodes),
+            "merge_place_nodes_count": float(self._step_merged_nodes),
+            "update_existing_place_nodes_count": float(self._step_updated_nodes),
+            "goal_relevance": float(goal_relevance.item()),
+            "goal_relevance_score": float(goal_relevance_score.item()),
+            "created_goal_relevance": self._mean_float_or_nan(self._step_created_goal_relevance),
+            "updated_goal_relevance": self._mean_float_or_nan(self._step_updated_goal_relevance),
+            "merged_goal_relevance": self._mean_float_or_nan(self._step_merged_goal_relevance),
+            "goal_relevance_of_created_nodes": self._mean_float_or_nan(self._step_created_goal_relevance),
+            "goal_relevance_of_updated_nodes": self._mean_float_or_nan(self._step_updated_goal_relevance),
+            "goal_relevance_of_merged_nodes": self._mean_float_or_nan(self._step_merged_goal_relevance),
+            "novelty_score": float(novelty_score.item()),
+            "visual_change": float(visual_change.item()),
+            "best_association_score": float(best_assoc),
+            "base_create": float(base_create),
+            "goal_boost_create": float(goal_boost_create),
+            "final_create": float(create_new),
+            "spatial_create": float(spatial_create),
+            "visual_create": float(visual_create),
+            "turn_create": float(turn_create),
+            "merge_unreliable": float(merge_unreliable),
+            "event_debug_create": float(event_debug_create),
+            "create_score": float(create_score.item()),
+            "create_rate": float(self._step_new_nodes) / update_denominator,
+            "update_rate": float(self._step_updated_nodes) / update_denominator,
+            "merge_rate": float(self._step_merged_nodes) / update_denominator,
         }
         return self._last_update_stats
 
@@ -840,7 +1010,7 @@ class TopoMemoryGraph:
         history_xy: torch.Tensor,
         landmark_history: Optional[Sequence[Sequence[dict]]],
         current_grid: int,
-        time_decay_rate: torch.Tensor,
+        time_decay_rate: Optional[torch.Tensor],
     ) -> None:
         """Fallback debug path that rebuilds the graph by replaying history."""
 
@@ -889,6 +1059,7 @@ class TopoMemoryGraph:
         self,
         instruction_feat: torch.Tensor,
         k: int,
+        current_feature: Optional[torch.Tensor] = None,
         device: Optional[torch.device] = None,
         dtype: Optional[torch.dtype] = None,
     ) -> Dict[str, object]:
@@ -900,37 +1071,54 @@ class TopoMemoryGraph:
         self.token_encoder.to(device=device, dtype=hidden_dtype)
         instruction_feat = self._to_device(instruction_feat, device, hidden_dtype)
         if not self.place_nodes:
-            place_token = self._normalize_feature_matrix(
-                self._to_device(self.fallback_feature, device, hidden_dtype),
-                name="retrieve_global_graph_tokens.place_tokens[fallback]",
+            empty_tokens = self._normalize_feature_matrix(
+                instruction_feat.new_zeros((0, instruction_feat.shape[-1])),
+                name="retrieve_global_graph_tokens.place_tokens[empty]",
             )
-            place_position = self._to_device(self.base_positions[:1].clone(), device, self.base_positions.dtype)
-            place_ids = torch.zeros(1, device=device, dtype=torch.long)
+            empty_positions = self._to_device(self.base_positions[:0].clone(), device, self.base_positions.dtype)
+            place_ids = torch.zeros(0, device=device, dtype=torch.long)
             return {
-                "place_tokens": place_token,
-                "place_positions": place_position,
+                "place_tokens": empty_tokens,
+                "place_positions": empty_positions,
                 "place_ids": place_ids,
                 "landmark_tokens": self._normalize_feature_matrix(
-                    place_token.new_zeros((0, place_token.shape[-1])),
+                    empty_tokens.new_zeros((0, empty_tokens.shape[-1])),
                     name="retrieve_global_graph_tokens.landmark_tokens[empty]",
                 ),
                 "event_tokens": self._normalize_feature_matrix(
-                    place_token.new_zeros((0, place_token.shape[-1])),
+                    empty_tokens.new_zeros((0, empty_tokens.shape[-1])),
                     name="retrieve_global_graph_tokens.event_tokens[empty]",
                 ),
+                "retrieval_scores": empty_tokens.new_zeros((0,)),
             }
 
         ranked_ids = []
+        if current_feature is None:
+            current_feature = self.fallback_feature
+        current_feature = self._to_device(current_feature, device, hidden_dtype)
+        max_visit = max(float(place.visit_count) for place in self.place_nodes)
         for place in self.place_nodes:
-            visual_score = safe_cosine_similarity(
-                place.visual_prototype(device=device, dtype=hidden_dtype).unsqueeze(0),
-                instruction_feat.unsqueeze(0),
-            ).item()
-            score = 0.7 * place.goal_relevance + 0.2 * visual_score + 0.1 * place.novelty_score
+            goal_score = max(0.0, min(1.0, 0.5 * (float(place.goal_relevance) + 1.0)))
+            visual_score = 0.5 * (
+                safe_cosine_similarity(
+                    place.visual_prototype(device=device, dtype=hidden_dtype).unsqueeze(0),
+                    current_feature.unsqueeze(0),
+                ).item()
+                + 1.0
+            )
+            visit_score = float(place.visit_count) / max(max_visit, 1.0)
+            score = (
+                float(getattr(self.args, "retrieve_goal_weight", 0.50)) * goal_score
+                + float(getattr(self.args, "retrieve_visual_weight", 0.30)) * visual_score
+                + float(getattr(self.args, "retrieve_visit_weight", 0.20)) * visit_score
+            )
             ranked_ids.append((place.node_id, score))
         ranked_ids.sort(key=lambda item: item[1], reverse=True)
-        selected_ids = [node_id for node_id, _ in ranked_ids[: max(int(k), 1)]]
+        top_k = min(max(int(k), 1), len(ranked_ids))
+        selected_ranked = ranked_ids[:top_k]
+        selected_ids = [node_id for node_id, _ in selected_ranked]
         selected_places = [self._place_by_id(node_id) for node_id in selected_ids]
+        retrieval_scores = torch.tensor([score for _, score in selected_ranked], device=device, dtype=hidden_dtype)
 
         place_tokens = self._normalize_feature_matrix(
             torch.stack(
@@ -969,6 +1157,7 @@ class TopoMemoryGraph:
                 torch.stack(event_tokens, dim=0) if event_tokens else place_tokens.new_zeros((0, place_tokens.shape[-1])),
                 name="retrieve_global_graph_tokens.event_tokens",
             ),
+            "retrieval_scores": retrieval_scores,
         }
 
     def retrieve_local_subgraph_tokens(
@@ -995,10 +1184,19 @@ class TopoMemoryGraph:
                 "local_tokens": zero,
                 "local_context": zero.squeeze(0),
                 "patch_summary": zero.squeeze(0),
+                "local_place_count": 0.0,
+                "local_token_count": 0.0,
+                "active_node_valid": 0.0,
             }
 
+        valid_ids = {place.node_id for place in self.place_nodes}
+        active_node_valid = 1.0
         if active_node_id is None:
             active_node_id = self.place_nodes[0].node_id
+            active_node_valid = 0.0
+        elif active_node_id not in valid_ids:
+            active_node_id = self.place_nodes[0].node_id
+            active_node_valid = 0.0
 
         connected_ids = {active_node_id}
         frontier = {active_node_id}
@@ -1081,6 +1279,9 @@ class TopoMemoryGraph:
             "local_tokens": local_tokens_cat,
             "local_context": local_tokens_cat.mean(dim=0),
             "patch_summary": patch_summary,
+            "local_place_count": float(len(ordered_places)),
+            "local_token_count": float(local_tokens_cat.shape[0]),
+            "active_node_valid": float(active_node_valid),
         }
 
     def export_for_transformer(
@@ -1100,6 +1301,10 @@ class TopoMemoryGraph:
                 self._to_device(self.fallback_feature, device, hidden_dtype),
                 name="export_for_transformer.node_features[fallback]",
             )
+            empty_tokens = self._normalize_feature_matrix(
+                zero_feature.new_zeros((0, zero_feature.shape[-1])),
+                name="export_for_transformer.global_local_tokens[empty]",
+            )
             base_positions = self._to_device(self.base_positions, device, self.base_positions.dtype)
             return {
                 "node_features": self._normalize_feature_matrix(
@@ -1116,11 +1321,20 @@ class TopoMemoryGraph:
                 "neighbor_mask": torch.ones(1, max_neighbors, device=device, dtype=torch.bool),
                 "local_context": self._to_device(self.fallback_feature.clone(), device, hidden_dtype),
                 "local_patch_context": self._to_device(self.fallback_feature.clone(), device, hidden_dtype),
+                "global_retrieved_tokens": empty_tokens,
+                "local_subgraph_tokens": empty_tokens,
                 "stats": {
+                    "place_node_count": 0.0,
+                    "avg_place_nodes": 0.0,
+                    "max_place_nodes_used": 0.0,
+                    "min_place_nodes_used": 0.0,
                     "nodes_after_merge": 0.0,
                     "created_nodes": 0.0,
                     "updated_nodes": 0.0,
                     "merged_nodes": 0.0,
+                    "create_place_nodes_count": 0.0,
+                    "merge_place_nodes_count": 0.0,
+                    "update_existing_place_nodes_count": 0.0,
                     "landmark_nodes": 0.0,
                     "event_nodes": 0.0,
                     "temporal_edges": 0.0,
@@ -1128,12 +1342,30 @@ class TopoMemoryGraph:
                     "semantic_edges": 0.0,
                     "reobservation_edges": 0.0,
                     "active_place_id": -1.0,
+                    "global_retrieved_nodes": 0.0,
+                    "local_retrieved_nodes": 0.0,
+                    "active_node_valid_ratio": 0.0,
+                    "empty_retrieval_ratio": 1.0,
+                    "node_saturation_ratio": 0.0,
+                    "retrieval_coverage": 0.0,
+                    "avg_goal_relevance": 0.0,
+                    "max_goal_relevance": 0.0,
+                    "created_goal_relevance": 0.0,
+                    "updated_goal_relevance": 0.0,
+                    "merged_goal_relevance": 0.0,
+                    "global_token_count": 0.0,
+                    "local_token_count": 0.0,
+                    "topo_token_norm_mean": 0.0,
+                    "topo_token_norm_std": 0.0,
+                    "global_token_norm_mean": 0.0,
+                    "local_token_norm_mean": 0.0,
                 },
             }
 
         global_out = self.retrieve_global_graph_tokens(
             self.instruction_feat,
             int(self.args.global_retrieve_k),
+            current_feature=self.fallback_feature,
             device=device,
             dtype=hidden_dtype,
         )
@@ -1214,10 +1446,17 @@ class TopoMemoryGraph:
             cell_to_node_map = torch.zeros(self.base_positions.shape[0], device=device, dtype=torch.long)
 
         stats = {
+            "place_node_count": float(len(self.place_nodes)),
+            "avg_place_nodes": float(len(self.place_nodes)),
+            "max_place_nodes_used": float(len(self.place_nodes)),
+            "min_place_nodes_used": float(len(self.place_nodes)),
             "nodes_after_merge": float(len(self.place_nodes)),
             "created_nodes": float(self._step_new_nodes),
             "updated_nodes": float(self._step_updated_nodes),
             "merged_nodes": float(self._step_merged_nodes),
+            "create_place_nodes_count": float(self._step_new_nodes),
+            "merge_place_nodes_count": float(self._step_merged_nodes),
+            "update_existing_place_nodes_count": float(self._step_updated_nodes),
             "landmark_nodes": float(len(self.landmark_nodes)),
             "event_nodes": float(len(self.event_nodes)),
             "temporal_edges": float(len(self.temporal_edges)),
@@ -1226,6 +1465,38 @@ class TopoMemoryGraph:
             "reobservation_edges": float(len(self.reobservation_edges)),
             "active_place_id": float(self._active_place_id) if self._active_place_id is not None else -1.0,
         }
+        goal_relevances = [float(place.goal_relevance) for place in self.place_nodes]
+        local_tokens = local_out["local_tokens"]
+        global_norm_stats = self._token_norm_stats(place_tokens)
+        local_norm_stats = self._token_norm_stats(local_tokens)
+        if place_tokens.numel() > 0 and local_tokens.numel() > 0:
+            topo_tokens_for_stats = torch.cat((place_tokens, local_tokens), dim=0)
+        elif place_tokens.numel() > 0:
+            topo_tokens_for_stats = place_tokens
+        else:
+            topo_tokens_for_stats = local_tokens
+        topo_norm_stats = self._token_norm_stats(topo_tokens_for_stats)
+        stats.update(
+            {
+                "global_retrieved_nodes": float(place_tokens.shape[0]),
+                "local_retrieved_nodes": float(local_out.get("local_place_count", 0.0)),
+                "active_node_valid_ratio": float(local_out.get("active_node_valid", 0.0)),
+                "empty_retrieval_ratio": 0.0 if place_tokens.shape[0] > 0 else 1.0,
+                "node_saturation_ratio": float(len(self.place_nodes)) / max(float(self.args.max_place_nodes), 1.0),
+                "retrieval_coverage": float(place_tokens.shape[0]) / max(float(len(self.place_nodes)), 1.0),
+                "avg_goal_relevance": self._mean_float(goal_relevances),
+                "max_goal_relevance": max(goal_relevances) if goal_relevances else 0.0,
+                "created_goal_relevance": self._mean_float_or_nan(self._step_created_goal_relevance),
+                "updated_goal_relevance": self._mean_float_or_nan(self._step_updated_goal_relevance),
+                "merged_goal_relevance": self._mean_float_or_nan(self._step_merged_goal_relevance),
+                "global_token_count": float(place_tokens.shape[0]),
+                "local_token_count": float(local_tokens.shape[0]),
+                "topo_token_norm_mean": topo_norm_stats["mean"],
+                "topo_token_norm_std": topo_norm_stats["std"],
+                "global_token_norm_mean": global_norm_stats["mean"],
+                "local_token_norm_mean": local_norm_stats["mean"],
+            }
+        )
         stats.update(self._last_update_stats)
         return {
             "node_features": self._normalize_feature_matrix(
@@ -1242,6 +1513,8 @@ class TopoMemoryGraph:
             "neighbor_mask": neighbor_mask,
             "local_context": local_out["local_context"],
             "local_patch_context": local_out["patch_summary"],
+            "global_retrieved_tokens": place_tokens,
+            "local_subgraph_tokens": local_tokens,
             "stats": stats,
         }
 
@@ -1265,7 +1538,7 @@ class TopoMemoryBuilder(nn.Module):
         lang_goal_embed: torch.Tensor,
         current_grid: int,
         fallback_feature: torch.Tensor,
-        time_decay_rate: torch.Tensor,
+        time_decay_rate: Optional[torch.Tensor],
     ) -> Dict[str, object]:
         """Rebuild a graph by replaying history as a debug / fallback path."""
 
@@ -1296,12 +1569,13 @@ class TopoMemoryBuilder(nn.Module):
         lang_goal_embed: torch.Tensor,
         current_grids: torch.Tensor,
         fallback_features: torch.Tensor,
-        time_decay_rate: torch.Tensor,
+        time_decay_rate: Optional[torch.Tensor],
     ) -> Dict[str, torch.Tensor]:
         """Batch the rebuild-from-history fallback outputs."""
 
         outputs = []
         max_nodes = 1
+        max_local_tokens = 1
         max_neighbors = max(int(self.args.patch_bank_size), 1)
         for batch_idx in range(history_features.shape[0]):
             landmarks_i = None if landmark_history is None else landmark_history[batch_idx]
@@ -1319,17 +1593,25 @@ class TopoMemoryBuilder(nn.Module):
             )
             outputs.append(output)
             max_nodes = max(max_nodes, int(output["node_features"].shape[0]))
+            max_local_tokens = max(max_local_tokens, int(output["local_subgraph_tokens"].shape[0]))
 
         node_features_padded = history_features.new_zeros(history_features.shape[0], max_nodes, history_features.shape[-1])
         node_positions_padded = base_positions.new_zeros(history_features.shape[0], max_nodes, 2)
         node_patch_padded = history_features.new_zeros(history_features.shape[0], max_nodes, history_features.shape[-1])
         node_padding_mask = torch.ones(history_features.shape[0], max_nodes, device=history_features.device, dtype=torch.bool)
+        local_subgraph_tokens_padded = history_features.new_zeros(history_features.shape[0], max_local_tokens, history_features.shape[-1])
+        local_token_padding_mask = torch.ones(history_features.shape[0], max_local_tokens, device=history_features.device, dtype=torch.bool)
         cell_to_node_map = torch.zeros(history_features.shape[0], base_positions.shape[1], device=history_features.device, dtype=torch.long)
         neighbor_index_padded = torch.zeros(history_features.shape[0], max_nodes, max_neighbors, device=history_features.device, dtype=torch.long)
         neighbor_mask_padded = torch.ones(history_features.shape[0], max_nodes, max_neighbors, device=history_features.device, dtype=torch.bool)
         local_context = history_features.new_zeros(history_features.shape[0], history_features.shape[-1])
         local_patch_context = history_features.new_zeros(history_features.shape[0], history_features.shape[-1])
         stats_accumulator: Dict[str, List[float]] = {}
+        place_node_counts: List[float] = []
+        global_retrieved_counts: List[float] = []
+        local_retrieved_counts: List[float] = []
+        active_valid_values: List[float] = []
+        empty_retrieval_values: List[float] = []
 
         for batch_idx, output in enumerate(outputs):
             count = int(output["node_features"].shape[0])
@@ -1337,6 +1619,11 @@ class TopoMemoryBuilder(nn.Module):
             node_positions_padded[batch_idx, :count] = output["node_positions"]
             node_patch_padded[batch_idx, :count] = output["node_patch"]
             node_padding_mask[batch_idx, :count] = False
+            local_tokens = output["local_subgraph_tokens"]
+            local_count = int(local_tokens.shape[0])
+            if local_count > 0:
+                local_subgraph_tokens_padded[batch_idx, :local_count] = local_tokens
+                local_token_padding_mask[batch_idx, :local_count] = False
             cell_to_node_map[batch_idx] = output["cell_to_node_map"]
             neighbor_index = output["neighbor_index"]
             neighbor_mask = output["neighbor_mask"]
@@ -1346,16 +1633,37 @@ class TopoMemoryBuilder(nn.Module):
             local_patch_context[batch_idx] = output["local_patch_context"]
             for key, value in output["stats"].items():
                 stats_accumulator.setdefault(key, []).append(float(value))
+            stats = output["stats"]
+            place_node_counts.append(float(stats.get("place_node_count", stats.get("nodes_after_merge", 0.0))))
+            global_retrieved_counts.append(float(stats.get("global_retrieved_nodes", 0.0)))
+            local_retrieved_counts.append(float(stats.get("local_retrieved_nodes", 0.0)))
+            active_valid_values.append(float(stats.get("active_node_valid_ratio", 0.0)))
+            empty_retrieval_values.append(float(stats.get("empty_retrieval_ratio", 0.0)))
 
         mean_stats = {
             key: float(sum(values) / max(len(values), 1))
             for key, values in stats_accumulator.items()
         }
+        if place_node_counts:
+            mean_stats.update(
+                {
+                    "avg_place_nodes": float(sum(place_node_counts) / len(place_node_counts)),
+                    "max_place_nodes_used": float(max(place_node_counts)),
+                    "min_place_nodes_used": float(min(place_node_counts)),
+                    "global_retrieved_nodes": float(sum(global_retrieved_counts) / len(global_retrieved_counts)),
+                    "local_retrieved_nodes": float(sum(local_retrieved_counts) / len(local_retrieved_counts)),
+                    "active_node_valid_ratio": float(sum(active_valid_values) / len(active_valid_values)),
+                    "empty_retrieval_ratio": float(sum(empty_retrieval_values) / len(empty_retrieval_values)),
+                }
+            )
         return {
             "node_features_padded": node_features_padded,
+            "global_retrieved_tokens_padded": node_features_padded,
             "node_positions_padded": node_positions_padded,
             "node_patch_padded": node_patch_padded,
             "node_padding_mask": node_padding_mask,
+            "local_subgraph_tokens_padded": local_subgraph_tokens_padded,
+            "local_token_padding_mask": local_token_padding_mask,
             "cell_to_node_map": cell_to_node_map,
             "neighbor_index_padded": neighbor_index_padded,
             "neighbor_mask_padded": neighbor_mask_padded,
@@ -1430,7 +1738,7 @@ class BatchedTopoMemory:
         xy: Optional[torch.Tensor],
         landmark_info: Sequence[dict],
         step_id: int,
-        time_decay_rate: torch.Tensor,
+        time_decay_rate: Optional[torch.Tensor],
         fallback_feature: Optional[torch.Tensor] = None,
     ) -> Dict[str, float]:
         """Update one env graph in-place."""
@@ -1458,6 +1766,7 @@ class BatchedTopoMemory:
         self.token_encoder.to(device=device, dtype=dtype)
         outputs = [graph.export_for_transformer(device=device, dtype=dtype) for graph in self.graphs]
         max_nodes = max(int(output["node_features"].shape[0]) for output in outputs)
+        max_local_tokens = max(max(int(output["local_subgraph_tokens"].shape[0]), 1) for output in outputs)
         max_neighbors = max(int(output["neighbor_index"].shape[1]) for output in outputs)
         batch_size = len(outputs)
         hidden_size = template_tensor.shape[-1]
@@ -1466,12 +1775,19 @@ class BatchedTopoMemory:
         node_positions_padded = template_tensor.new_zeros(batch_size, max_nodes, 2)
         node_patch_padded = template_tensor.new_zeros(batch_size, max_nodes, hidden_size)
         node_padding_mask = torch.ones(batch_size, max_nodes, device=template_tensor.device, dtype=torch.bool)
+        local_subgraph_tokens_padded = template_tensor.new_zeros(batch_size, max_local_tokens, hidden_size)
+        local_token_padding_mask = torch.ones(batch_size, max_local_tokens, device=template_tensor.device, dtype=torch.bool)
         cell_to_node_map = torch.zeros(batch_size, self.graphs[0].base_positions.shape[0], device=template_tensor.device, dtype=torch.long)
         neighbor_index_padded = torch.zeros(batch_size, max_nodes, max_neighbors, device=template_tensor.device, dtype=torch.long)
         neighbor_mask_padded = torch.ones(batch_size, max_nodes, max_neighbors, device=template_tensor.device, dtype=torch.bool)
         local_context = template_tensor.new_zeros(batch_size, hidden_size)
         local_patch_context = template_tensor.new_zeros(batch_size, hidden_size)
         stats_accumulator: Dict[str, List[float]] = {}
+        place_node_counts: List[float] = []
+        global_retrieved_counts: List[float] = []
+        local_retrieved_counts: List[float] = []
+        active_valid_values: List[float] = []
+        empty_retrieval_values: List[float] = []
 
         for env_idx, output in enumerate(outputs):
             node_features = self.graphs[env_idx]._normalize_feature_matrix(
@@ -1492,6 +1808,11 @@ class BatchedTopoMemory:
             node_positions_padded[env_idx, :count] = output["node_positions"].to(template_tensor.device)
             node_patch_padded[env_idx, :count] = node_patch.to(template_tensor.device)
             node_padding_mask[env_idx, :count] = False
+            local_tokens = output["local_subgraph_tokens"].to(template_tensor.device)
+            local_count = int(local_tokens.shape[0])
+            if local_count > 0:
+                local_subgraph_tokens_padded[env_idx, :local_count] = local_tokens
+                local_token_padding_mask[env_idx, :local_count] = False
             cell_to_node_map[env_idx] = output["cell_to_node_map"].to(template_tensor.device)
             neighbor_index = output["neighbor_index"].to(template_tensor.device)
             neighbor_mask = output["neighbor_mask"].to(template_tensor.device)
@@ -1501,16 +1822,37 @@ class BatchedTopoMemory:
             local_patch_context[env_idx] = output["local_patch_context"].to(template_tensor.device)
             for key, value in output["stats"].items():
                 stats_accumulator.setdefault(key, []).append(float(value))
+            stats = output["stats"]
+            place_node_counts.append(float(stats.get("place_node_count", stats.get("nodes_after_merge", 0.0))))
+            global_retrieved_counts.append(float(stats.get("global_retrieved_nodes", 0.0)))
+            local_retrieved_counts.append(float(stats.get("local_retrieved_nodes", 0.0)))
+            active_valid_values.append(float(stats.get("active_node_valid_ratio", 0.0)))
+            empty_retrieval_values.append(float(stats.get("empty_retrieval_ratio", 0.0)))
 
         mean_stats = {
             key: float(sum(values) / max(len(values), 1))
             for key, values in stats_accumulator.items()
         }
+        if place_node_counts:
+            mean_stats.update(
+                {
+                    "avg_place_nodes": float(sum(place_node_counts) / len(place_node_counts)),
+                    "max_place_nodes_used": float(max(place_node_counts)),
+                    "min_place_nodes_used": float(min(place_node_counts)),
+                    "global_retrieved_nodes": float(sum(global_retrieved_counts) / len(global_retrieved_counts)),
+                    "local_retrieved_nodes": float(sum(local_retrieved_counts) / len(local_retrieved_counts)),
+                    "active_node_valid_ratio": float(sum(active_valid_values) / len(active_valid_values)),
+                    "empty_retrieval_ratio": float(sum(empty_retrieval_values) / len(empty_retrieval_values)),
+                }
+            )
         return {
             "node_features_padded": node_features_padded,
+            "global_retrieved_tokens_padded": node_features_padded,
             "node_positions_padded": node_positions_padded,
             "node_patch_padded": node_patch_padded,
             "node_padding_mask": node_padding_mask,
+            "local_subgraph_tokens_padded": local_subgraph_tokens_padded,
+            "local_token_padding_mask": local_token_padding_mask,
             "cell_to_node_map": cell_to_node_map,
             "neighbor_index_padded": neighbor_index_padded,
             "neighbor_mask_padded": neighbor_mask_padded,

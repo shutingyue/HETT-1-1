@@ -126,7 +126,10 @@ class CityNavBatch(torch.utils.data.IterableDataset):
         cropclient.load_image_cache()
         objects = get_city_refer_objects()
         full_data = generate_episodes_from_mturk_trajectories(
-            objects, load_mturk_trajectories(split, 'all', args.altitude))
+            objects,
+            load_mturk_trajectories(split, 'all', args.altitude),
+            disable_tqdm=(rank != 0),
+        )
 
         random.seed(seed)
         if self.split == 'train_seen':

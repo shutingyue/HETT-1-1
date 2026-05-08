@@ -18,6 +18,7 @@ def build_args(spatial_compression):
         dropout_emb=0.0,
         grid_size=5,
         spatial_compression=spatial_compression,
+        use_time_decay=False,
         spatial_dist_threshold=1,
         spatial_far_coarse_size=2,
     )

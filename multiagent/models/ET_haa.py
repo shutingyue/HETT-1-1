@@ -133,6 +133,7 @@ class ET(nn.Module):
         self.text_proj = nn.Linear(768, 768)
         self.grid_proj = nn.Linear(768, 768)
         self.use_topo_memory = args.enable_topo_memory
+        self.use_time_decay = bool(getattr(args, "use_time_decay", False))
         if self.use_topo_memory:
             self.topo_memory_builder = TopoMemoryBuilder(args)
             self.topo_goal_offset = nn.Sequential(
@@ -143,9 +144,11 @@ class ET(nn.Module):
             self.topo_patch_proj = nn.Linear(self.args.demb, self.args.demb)
             self.topo_visual_gate = nn.Linear(self.args.demb * 2, self.args.demb)
             self.topo_action_gate = nn.Linear(self.args.demb * 2, self.args.demb)
-        # 【新增】：定义可学习的时间衰减系数，初始值给一个小一点的正数（如0.1）
-        self.decay_rate = nn.Parameter(torch.tensor(0.1))
-        # 【新增】：定义一个全局计数器，记录 forward 被调用了多少次
+        # Only create the learned decay parameter when the explicit flag is enabled.
+        # When disabled, the model has no time-decay state and all history scoring stays
+        # on the original similarity-only path.
+        if self.use_time_decay:
+            self.decay_rate = nn.Parameter(torch.tensor(0.1))
         self.print_counter = 0
         self.topo_debug_cache = None
         self.topo_eval_debug_batches = 0
@@ -156,7 +159,7 @@ class ET(nn.Module):
         else:
             grid_fts_weight = tmp_fts.new_zeros((0,))
 
-        if time_steps is not None and current_t is not None and tmp_fts.shape[0] > 0:
+        if self.use_time_decay and time_steps is not None and current_t is not None and tmp_fts.shape[0] > 0:
             delta_t = current_t - time_steps
             positive_decay_rate = F.softplus(self.decay_rate)
             time_penalty = positive_decay_rate * delta_t
@@ -166,6 +169,57 @@ class ET(nn.Module):
     def _fuse_patch_context(self, base_feat, patch_feat, gate_layer):
         gate = torch.sigmoid(gate_layer(torch.cat((base_feat, patch_feat), dim=-1)))
         return base_feat + gate * patch_feat
+
+    def _append_topo_token_debug_stats(
+        self,
+        stats_accumulator,
+        global_tokens,
+        global_padding_mask,
+        local_tokens=None,
+        local_padding_mask=None,
+    ):
+        """Collect lightweight global/local topo token stats for training logs."""
+
+        global_valid = ~global_padding_mask.bool()
+        global_counts = global_valid.sum(dim=1).to(torch.float32)
+        stats_accumulator["global_token_count"].append(float(global_counts.mean().item()))
+        global_norms = global_tokens.norm(dim=-1).masked_select(global_valid)
+        if global_norms.numel() > 0:
+            stats_accumulator["global_token_norm_mean"].append(float(global_norms.mean().item()))
+        else:
+            stats_accumulator["global_token_norm_mean"].append(0.0)
+
+        local_norms = global_tokens.new_zeros((0,))
+        if local_tokens is not None:
+            if local_padding_mask is None:
+                local_valid = torch.ones(local_tokens.shape[:2], device=local_tokens.device, dtype=torch.bool)
+            else:
+                local_valid = ~local_padding_mask.bool()
+            local_counts = local_valid.sum(dim=1).to(torch.float32)
+            stats_accumulator["local_token_count"].append(float(local_counts.mean().item()))
+            local_norms = local_tokens.norm(dim=-1).masked_select(local_valid)
+            if local_norms.numel() > 0:
+                stats_accumulator["local_token_norm_mean"].append(float(local_norms.mean().item()))
+            else:
+                stats_accumulator["local_token_norm_mean"].append(0.0)
+        else:
+            stats_accumulator["local_token_count"].append(0.0)
+            stats_accumulator["local_token_norm_mean"].append(0.0)
+
+        if global_norms.numel() > 0 and local_norms.numel() > 0:
+            topo_norms = torch.cat((global_norms, local_norms), dim=0)
+        elif global_norms.numel() > 0:
+            topo_norms = global_norms
+        else:
+            topo_norms = local_norms
+        if topo_norms.numel() > 0:
+            stats_accumulator["topo_token_norm_mean"].append(float(topo_norms.mean().item()))
+            stats_accumulator["topo_token_norm_std"].append(
+                float(topo_norms.std(unbiased=False).item()) if topo_norms.numel() > 1 else 0.0
+            )
+        else:
+            stats_accumulator["topo_token_norm_mean"].append(0.0)
+            stats_accumulator["topo_token_norm_std"].append(0.0)
 
     def _validate_topo_history_alignment(
         self, batch_idx, history_features, history_index, history_times, history_xy=None
@@ -308,7 +362,7 @@ class ET(nn.Module):
         compression_stats = defaultdict(list)
         base_positions = inputs['candidates'].to(emb_lang.device).to(torch.float32)
         grid_cell_count = self.args.grid_size ** 2
-        positive_decay_rate = F.softplus(self.decay_rate)
+        positive_decay_rate = F.softplus(self.decay_rate) if self.use_time_decay else None
 
         topo_history_features = []
         topo_history_index = []
@@ -357,9 +411,17 @@ class ET(nn.Module):
         topo_outputs = None
         if self.use_topo_memory and topo_memory_outputs is not None:
             topo_outputs = topo_memory_outputs
+            # Global retrieved place tokens remain the spatial candidates for the coarse
+            # target head in the current minimal path.
+            # TODO: route global tokens to coarse stage explicitly if the model is split.
+            global_retrieved_tokens = topo_outputs.get(
+                "global_retrieved_tokens_padded",
+                topo_outputs["node_features_padded"],
+            )
+            local_subgraph_tokens = topo_outputs.get("local_subgraph_tokens_padded", None)
             emb_candidates = torch.zeros(
                 batch_size,
-                topo_outputs["node_features_padded"].shape[1],
+                global_retrieved_tokens.shape[1],
                 self.args.demb,
                 device=emb_lang.device,
             )
@@ -374,10 +436,17 @@ class ET(nn.Module):
                     * emb_lang[b:b + 1, :1, :]
                 )
                 emb_candidates[b, :token_count] = (
-                    pos_embed.squeeze(0) + topo_outputs["node_features_padded"][b, :token_count]
+                    pos_embed.squeeze(0) + global_retrieved_tokens[b, :token_count]
                 )
             for key, value in topo_outputs["stats"].items():
                 compression_stats[key].append(value)
+            self._append_topo_token_debug_stats(
+                compression_stats,
+                global_retrieved_tokens,
+                spatial_padding_mask,
+                local_subgraph_tokens,
+                topo_outputs.get("local_token_padding_mask", None),
+            )
         elif self.use_topo_memory and self.args.topo_rebuild_fallback:
             topo_eval_debug = (
                 not self.training and self.use_topo_memory and self.topo_eval_debug_batches < 3
@@ -431,9 +500,17 @@ class ET(nn.Module):
                 topo_fallback_tensor,
                 positive_decay_rate,
             )
+            # Global tokens are still used as coarse target candidates; local tokens are
+            # summarized later into the fine action/progress refinement path.
+            # TODO: route local tokens to fine stage explicitly if the transformer is split.
+            global_retrieved_tokens = topo_outputs.get(
+                "global_retrieved_tokens_padded",
+                topo_outputs["node_features_padded"],
+            )
+            local_subgraph_tokens = topo_outputs.get("local_subgraph_tokens_padded", None)
             emb_candidates = torch.zeros(
                 batch_size,
-                topo_outputs["node_features_padded"].shape[1],
+                global_retrieved_tokens.shape[1],
                 self.args.demb,
                 device=emb_lang.device,
             )
@@ -448,10 +525,17 @@ class ET(nn.Module):
                     * emb_lang[b:b + 1, :1, :]
                 )
                 emb_candidates[b, :token_count] = (
-                    pos_embed.squeeze(0) + topo_outputs["node_features_padded"][b, :token_count]
+                    pos_embed.squeeze(0) + global_retrieved_tokens[b, :token_count]
                 )
             for key, value in topo_outputs["stats"].items():
                 compression_stats[key].append(value)
+            self._append_topo_token_debug_stats(
+                compression_stats,
+                global_retrieved_tokens,
+                spatial_padding_mask,
+                local_subgraph_tokens,
+                topo_outputs.get("local_token_padding_mask", None),
+            )
         else:
             max_cell_num = max(token.shape[0] for token in candidate_token_features)
             emb_candidates = torch.zeros(batch_size, max_cell_num, self.args.demb, device=emb_lang.device)
@@ -498,6 +582,8 @@ class ET(nn.Module):
         target_decoder_input = encoder_out_candidates.reshape(-1, max_cell_num, self.args.demb)
 
         if self.use_topo_memory and topo_outputs is not None:
+            # Local active-subgraph summaries are kept out of the global candidate list and
+            # fused only into visual/action decoding for fine-stage refinement.
             local_context = topo_outputs["local_context"]
             local_patch_context = topo_outputs["local_patch_context"]
             masked_node_logits = self.decoder_2_logits_full(target_decoder_input).squeeze(-1)
@@ -650,7 +736,7 @@ class ET(nn.Module):
         # print(direction, progress, goal_logits)
         # =================== 【新增：参数监控探头】 ===================
         # self.training 是 PyTorch 自带的属性，确保我们只在训练阶段打印，验证/测试时不打印
-        if self.training: 
+        if self.training and self.use_time_decay:
             self.print_counter += 1
             # 每调用 500 次前向传播，打印一次
             if self.print_counter % 500 == 0:
