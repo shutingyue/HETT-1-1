@@ -1,0 +1,52 @@
+Experiment configuration:
+
+[Experiment]
+seed: 0
+mode: train
+world_size: 2
+local_rank: 0
+log_dir: log
+
+[Training]
+epochs: 5
+batch_size: 2
+learning_rate: 0.0001
+feedback: student
+eval_every: 1
+save_every: 1
+log_every: 1
+resume_optimizer: False
+
+[Memory]
+grid_size: 5
+enable_topo_memory: True
+use_topo_memory: True
+persistent_topo_memory: True
+use_time_decay: False
+use_memory_type_embedding: True
+num_memory_types: 4
+spatial_compression: False
+
+[Topo Memory]
+topo_max_nodes: 16
+global_retrieve_k: 16
+local_hops: 1
+topo_knn: 2
+topo_use_graph_encoder: True
+topo_message_passing_layers: 1
+topo_merge_radius: 0.12
+topo_create_radius: 0.2
+topo_update_momentum: 0.7
+
+[Topo Retrieval Weights]
+retrieve_goal_weight: 0.5
+retrieve_visual_weight: 0.3
+retrieve_visit_weight: 0.2
+goal_create_norm_threshold: 0.5
+
+[Disabled Nodes]
+use_landmark_nodes: False
+use_event_nodes: False
+
+
+Listener training starts, start epoch: 0

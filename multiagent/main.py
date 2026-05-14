@@ -38,6 +38,84 @@ def distributed_barrier():
         dist.barrier()
 
 
+EXPERIMENT_CONFIG_GROUPS = [
+    ("Experiment", [
+        "seed",
+        "mode",
+        "world_size",
+        "local_rank",
+        "log_dir",
+    ]),
+    ("Training", [
+        "epochs",
+        "batch_size",
+        "learning_rate",
+        "feedback",
+        "eval_every",
+        "save_every",
+        "log_every",
+        "resume_optimizer",
+    ]),
+    ("Memory", [
+        "grid_size",
+        "enable_topo_memory",
+        "use_topo_memory",
+        "persistent_topo_memory",
+        "use_time_decay",
+        "use_memory_type_embedding",
+        "num_memory_types",
+        "spatial_compression",
+    ]),
+    ("Topo Memory", [
+        "topo_max_nodes",
+        "global_retrieve_k",
+        "local_hops",
+        "topo_knn",
+        "topo_use_graph_encoder",
+        "topo_message_passing_layers",
+        "topo_merge_radius",
+        "topo_create_radius",
+        "topo_update_momentum",
+    ]),
+    ("Topo Retrieval Weights", [
+        "retrieve_goal_weight",
+        "retrieve_visual_weight",
+        "retrieve_visit_weight",
+        "goal_create_norm_threshold",
+    ]),
+    ("Disabled Nodes", [
+        "use_landmark_nodes",
+        "use_event_nodes",
+    ]),
+]
+
+
+def format_experiment_config(args):
+    lines = ["Experiment configuration:"]
+    for group_name, keys in EXPERIMENT_CONFIG_GROUPS:
+        group_lines = [f"{key}: {getattr(args, key)}" for key in keys if hasattr(args, key)]
+        if not group_lines:
+            continue
+        lines.append("")
+        lines.append(f"[{group_name}]")
+        lines.extend(group_lines)
+    return "\n".join(lines)
+
+
+def print_experiment_config(args):
+    config_text = format_experiment_config(args)
+    print(config_text)
+    return config_text
+
+
+def save_args_json(args, log_dir):
+    os.makedirs(log_dir, exist_ok=True)
+    args_path = os.path.join(log_dir, "args.json")
+    with open(args_path, "w") as outf:
+        json.dump(vars(args), outf, indent=4, sort_keys=True, default=str)
+    return args_path
+
+
 def format_compression_logs(logs):
     keys = [
         'tokens_before',
@@ -107,32 +185,81 @@ def format_topo_logs(logs):
     merge_rate = _mean_log_value(logs, 'merge_rate', merge_count / op_count)
     global_k = _mean_log_value(logs, 'global_retrieved_nodes')
     retrieval_coverage = _mean_log_value(logs, 'retrieval_coverage', global_k / max(avg_place_nodes, 1.0))
-    goal_rel_avg = _mean_log_value(logs, 'goal_relevance', _mean_log_value(logs, 'avg_goal_relevance'))
-    goal_rel_min = _min_log_value(logs, 'goal_relevance', goal_rel_avg)
-    goal_rel_max = _max_log_value(logs, 'goal_relevance', _mean_log_value(logs, 'max_goal_relevance', goal_rel_avg))
+    goal_rel_avg = _mean_log_value(logs, 'goal_rel_raw_avg', _mean_log_value(logs, 'goal_relevance', _mean_log_value(logs, 'avg_goal_relevance')))
+    goal_rel_min = _min_log_value(logs, 'goal_rel_raw_min', _min_log_value(logs, 'goal_relevance', goal_rel_avg))
+    goal_rel_max = _max_log_value(logs, 'goal_rel_raw_max', _max_log_value(logs, 'goal_relevance', _mean_log_value(logs, 'max_goal_relevance', goal_rel_avg)))
+    goal_rel_norm_avg = _mean_log_value(logs, 'goal_rel_norm_avg', _mean_log_value(logs, 'avg_goal_relevance_norm', float('nan')))
+    goal_rel_norm_min = _min_log_value(logs, 'goal_rel_norm_min', _min_log_value(logs, 'retrieval_goal_norm_min', goal_rel_norm_avg))
+    goal_rel_norm_max = _max_log_value(logs, 'goal_rel_norm_max', _max_log_value(logs, 'max_goal_relevance_norm', goal_rel_norm_avg))
     visual_change_avg = _mean_log_value(logs, 'visual_change')
     visual_change_min = _min_log_value(logs, 'visual_change', visual_change_avg)
     visual_change_max = _max_log_value(logs, 'visual_change', visual_change_avg)
     created_goal = _mean_log_value(
         logs,
-        'created_goal_relevance',
-        _mean_log_value(logs, 'goal_relevance_of_created_nodes', float('nan')),
+        'created_goal_raw',
+        _mean_log_value(
+            logs,
+            'created_goal_relevance',
+            _mean_log_value(logs, 'goal_relevance_of_created_nodes', float('nan')),
+        ),
+    )
+    created_goal_norm = _mean_log_value(
+        logs,
+        'created_goal_norm',
+        _mean_log_value(
+            logs,
+            'created_goal_relevance_norm',
+            _mean_log_value(logs, 'goal_relevance_norm_of_created_nodes', float('nan')),
+        ),
     )
     updated_goal = _mean_log_value(
         logs,
-        'updated_goal_relevance',
-        _mean_log_value(logs, 'goal_relevance_of_updated_nodes', float('nan')),
+        'updated_goal_raw',
+        _mean_log_value(
+            logs,
+            'updated_goal_relevance',
+            _mean_log_value(logs, 'goal_relevance_of_updated_nodes', float('nan')),
+        ),
+    )
+    updated_goal_norm = _mean_log_value(
+        logs,
+        'updated_goal_norm',
+        _mean_log_value(
+            logs,
+            'updated_goal_relevance_norm',
+            _mean_log_value(logs, 'goal_relevance_norm_of_updated_nodes', float('nan')),
+        ),
     )
     merged_goal = _mean_log_value(
         logs,
-        'merged_goal_relevance',
-        _mean_log_value(logs, 'goal_relevance_of_merged_nodes', float('nan')),
+        'merged_goal_raw',
+        _mean_log_value(
+            logs,
+            'merged_goal_relevance',
+            _mean_log_value(logs, 'goal_relevance_of_merged_nodes', float('nan')),
+        ),
     )
-    return (
+    merged_goal_norm = _mean_log_value(
+        logs,
+        'merged_goal_norm',
+        _mean_log_value(
+            logs,
+            'merged_goal_relevance_norm',
+            _mean_log_value(logs, 'goal_relevance_norm_of_merged_nodes', float('nan')),
+        ),
+    )
+    topo_line = (
         "[topo_stats] place_nodes avg={:.2f} min={:.2f} max={:.2f} sat={:.3f} "
         "create={:.2f} update={:.2f} merge={:.2f} create_rate={:.3f} update_rate={:.3f} merge_rate={:.3f} "
         "global_k={:.2f} local_k={:.2f} coverage={:.3f} active_valid={:.3f} empty={:.3f} "
-        "goal_rel avg={:.4f} range=[{:.4f},{:.4f}] created_goal={:.4f} updated_goal={:.4f} merged_goal={:.4f} "
+        "goal_rel_raw avg={:.4f} range=[{:.4f},{:.4f}] goal_rel_norm avg={:.4f} range=[{:.4f},{:.4f}] "
+        "goal_boost_fire={:.3f} created_goal_raw={:.4f} updated_goal_raw={:.4f} merged_goal_raw={:.4f} "
+        "created_goal_norm={:.4f} updated_goal_norm={:.4f} merged_goal_norm={:.4f} "
+        "base_create_triggers spatial={:.3f} visual={:.3f} turn={:.3f} merge_unrel={:.3f} goal_boost={:.3f} "
+        "trigger_goal_norm spatial={:.4f} visual={:.4f} turn={:.4f} merge_unrel={:.4f} goal_boost={:.4f} "
+        "retrieval_goal_raw={:.4f} retrieval_goal_norm avg={:.4f} range=[{:.4f},{:.4f}] topk_norm={:.4f} non_topk_norm={:.4f} "
+        "retrieval_components all(g/v/visit)={:.4f}/{:.4f}/{:.4f} topk={:.4f}/{:.4f}/{:.4f} non_topk={:.4f}/{:.4f}/{:.4f} "
+        "topk_largest goal={:.3f} visual={:.3f} visit={:.3f} "
         "visual_change avg={:.4f} range=[{:.4f},{:.4f}] "
         "token_norm topo={:.4f}+/-{:.4f} global={:.4f} local={:.4f}"
     ).format(
@@ -154,9 +281,44 @@ def format_topo_logs(logs):
         goal_rel_avg,
         goal_rel_min,
         goal_rel_max,
+        goal_rel_norm_avg,
+        goal_rel_norm_min,
+        goal_rel_norm_max,
+        _mean_log_value(logs, 'goal_boost_fire_rate', _mean_log_value(logs, 'goal_boost_create')),
         created_goal,
         updated_goal,
         merged_goal,
+        created_goal_norm,
+        updated_goal_norm,
+        merged_goal_norm,
+        _mean_log_value(logs, 'spatial_create_rate', _mean_log_value(logs, 'spatial_create')),
+        _mean_log_value(logs, 'visual_create_rate', _mean_log_value(logs, 'visual_create')),
+        _mean_log_value(logs, 'turn_create_rate', _mean_log_value(logs, 'turn_create')),
+        _mean_log_value(logs, 'merge_unreliable_rate', _mean_log_value(logs, 'merge_unreliable')),
+        _mean_log_value(logs, 'goal_boost_create_rate', _mean_log_value(logs, 'goal_boost_create')),
+        _mean_log_value(logs, 'spatial_create_goal_norm', float('nan')),
+        _mean_log_value(logs, 'visual_create_goal_norm', float('nan')),
+        _mean_log_value(logs, 'turn_create_goal_norm', float('nan')),
+        _mean_log_value(logs, 'merge_unreliable_goal_norm', float('nan')),
+        _mean_log_value(logs, 'goal_boost_goal_norm', float('nan')),
+        _mean_log_value(logs, 'retrieval_goal_raw_avg', float('nan')),
+        _mean_log_value(logs, 'retrieval_goal_norm_avg', float('nan')),
+        _min_log_value(logs, 'retrieval_goal_norm_min', float('nan')),
+        _max_log_value(logs, 'retrieval_goal_norm_max', float('nan')),
+        _mean_log_value(logs, 'retrieval_topk_goal_norm', _mean_log_value(logs, 'topk_goal_norm_mean', float('nan'))),
+        _mean_log_value(logs, 'retrieval_non_topk_goal_norm', float('nan')),
+        _mean_log_value(logs, 'retrieval_goal_component_avg', float('nan')),
+        _mean_log_value(logs, 'retrieval_visual_component_avg', float('nan')),
+        _mean_log_value(logs, 'retrieval_visit_component_avg', float('nan')),
+        _mean_log_value(logs, 'topk_goal_component_avg', float('nan')),
+        _mean_log_value(logs, 'topk_visual_component_avg', float('nan')),
+        _mean_log_value(logs, 'topk_visit_component_avg', float('nan')),
+        _mean_log_value(logs, 'non_topk_goal_component_avg', float('nan')),
+        _mean_log_value(logs, 'non_topk_visual_component_avg', float('nan')),
+        _mean_log_value(logs, 'non_topk_visit_component_avg', float('nan')),
+        _mean_log_value(logs, 'topk_goal_largest_component_rate', float('nan')),
+        _mean_log_value(logs, 'topk_visual_largest_component_rate', float('nan')),
+        _mean_log_value(logs, 'topk_visit_largest_component_rate', float('nan')),
         visual_change_avg,
         visual_change_min,
         visual_change_max,
@@ -165,6 +327,38 @@ def format_topo_logs(logs):
         _mean_log_value(logs, 'global_token_norm_mean'),
         _mean_log_value(logs, 'local_token_norm_mean'),
     )
+    if logs.get('raw_landmark_count', []) or logs.get('valid_landmark_count', []):
+        topo_line += (
+            " landmarks raw={:.2f} valid={:.2f} retrieved={:.2f} local={:.2f} "
+            "edges={:.2f} degree avg={:.2f} max={:.2f} "
+            "conf avg={:.3f} range=[{:.3f},{:.3f}] text_rel={:.3f} geo={:.3f} visual={:.3f} "
+            "lm_norm={:.4f} gate={:.3f} ratio={:.3f} empty={:.3f} low_conf={:.2f} all_to_all={:.0f}"
+        ).format(
+            _mean_log_value(logs, 'raw_landmark_count'),
+            _mean_log_value(logs, 'valid_landmark_count'),
+            _mean_log_value(logs, 'retrieved_landmark_count'),
+            _mean_log_value(logs, 'local_retrieved_landmark_count'),
+            _mean_log_value(logs, 'attached_landmark_edges'),
+            _mean_log_value(logs, 'avg_landmark_degree'),
+            _mean_log_value(logs, 'max_landmark_degree'),
+            _mean_log_value(logs, 'landmark_conf_avg'),
+            _min_log_value(logs, 'landmark_conf_min'),
+            _max_log_value(logs, 'landmark_conf_max'),
+            _mean_log_value(logs, 'landmark_text_rel_avg'),
+            _mean_log_value(logs, 'landmark_geo_score_avg'),
+            _mean_log_value(logs, 'landmark_visual_support_avg'),
+            _mean_log_value(logs, 'landmark_token_norm_mean'),
+            _mean_log_value(logs, 'landmark_gate_avg'),
+            _mean_log_value(logs, 'landmark_place_token_ratio'),
+            _mean_log_value(logs, 'landmark_empty_ratio'),
+            _mean_log_value(logs, 'landmark_filtered_low_conf_count'),
+            _max_log_value(logs, 'landmark_all_to_all_detected'),
+        )
+        if logs.get('original_landmark_map_norm', []):
+            topo_line += " original_lm_map_norm={:.4f}".format(
+                _mean_log_value(logs, 'original_landmark_map_norm')
+            )
+    return topo_line
 
 
 def get_tokenizer(args):
@@ -258,11 +452,11 @@ def train(args, train_env, val_envs, rank=-1):
     default_gpu = is_default_gpu(args)
 
     if default_gpu:
-        with open(os.path.join(GOAL_PREDICTOR_CHECKPOINT_DIR, 'training_args.json'), 'w') as outf:
-            json.dump(vars(args), outf, indent=4)
+        config_text = print_experiment_config(args)
+        save_args_json(args, args.log_dir)
         # writer = SummaryWriter(log_dir=args.log_dir)
-        record_file = os.path.join(GOAL_PREDICTOR_CHECKPOINT_DIR, 'train.txt')
-        write_to_record_file(str(args) + '\n\n', record_file)
+        record_file = os.path.join(args.log_dir, 'train.txt')
+        write_to_record_file(config_text + '\n', record_file, verbose=False)
 
     best_val = {'val_unseen': {"sr": 0., "state": ""}, 'val_unseen_full_traj': {"sr": 0., "state": ""}}
 

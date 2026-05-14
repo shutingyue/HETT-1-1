@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 from dataclasses import dataclass, field
+import math
 from typing import Dict, List, Optional, Sequence
 
 import torch
@@ -40,6 +41,7 @@ class PlaceNode:
     first_seen_step: int = 0
     last_seen_step: int = 0
     goal_relevance: float = 0.0
+    goal_relevance_norm: float = 0.5
     novelty_score: float = 1.0
 
     def visual_prototype(
@@ -67,8 +69,14 @@ class LandmarkNode:
     text_tag: str
     polygon: Optional[Sequence[Sequence[float]]]
     semantic_embedding: torch.Tensor
+    geometry_stats: torch.Tensor
     attached_place_ids: List[int] = field(default_factory=list)
+    attached_place_scores: Dict[int, float] = field(default_factory=dict)
     confidence: float = 0.0
+    instruction_relevance: float = 0.0
+    geometry_validity: float = 0.0
+    supporting_place_score: float = 0.0
+    visual_support_score: float = 0.0
     last_seen_step: int = 0
     center_xy: Optional[torch.Tensor] = None
 
@@ -99,6 +107,12 @@ class GraphTokenEncoder(nn.Module):
             nn.ReLU(),
             nn.Linear(hidden_size, hidden_size),
         )
+        self.landmark_geo = nn.Sequential(
+            nn.Linear(6, hidden_size),
+            nn.ReLU(),
+            nn.Linear(hidden_size, hidden_size),
+        )
+        self.landmark_norm = nn.LayerNorm(hidden_size)
         self.event_meta = nn.Sequential(
             nn.Linear(3, hidden_size),
             nn.ReLU(),
@@ -108,6 +122,7 @@ class GraphTokenEncoder(nn.Module):
         self.landmark_type = nn.Parameter(torch.randn(hidden_size) * 0.02)
         self.event_type = nn.Parameter(torch.randn(hidden_size) * 0.02)
         self.event_type_embed = nn.Embedding(len(EVENT_TYPE_TO_ID), hidden_size)
+        self.landmark_learnable_gate = nn.Parameter(torch.tensor(0.2))
 
     def _resolve_module_spec(
         self,
@@ -137,7 +152,7 @@ class GraphTokenEncoder(nn.Module):
             [
                 float(center_xy[0].item()),
                 float(center_xy[1].item()),
-                float(place.goal_relevance),
+                float(place.goal_relevance_norm),
                 float(place.novelty_score),
                 float(place.visit_count),
                 float(place.first_seen_step),
@@ -212,6 +227,9 @@ class GraphTokenEncoder(nn.Module):
     def encode_landmark(
         self,
         landmark: LandmarkNode,
+        support_places: Optional[Sequence[PlaceNode]] = None,
+        gate_mode: str = "confidence",
+        constant_gate: float = 0.2,
         device: Optional[torch.device] = None,
         dtype: Optional[torch.dtype] = None,
     ) -> torch.Tensor:
@@ -220,7 +238,28 @@ class GraphTokenEncoder(nn.Module):
         device, dtype = self._resolve_module_spec(self.landmark_meta, device=device, dtype=dtype)
         semantic_embedding = landmark.semantic_embedding.to(device=device, dtype=dtype)
         _, stats = self._landmark_stats_tensor(landmark, device=device, dtype=dtype)
-        return semantic_embedding + self.landmark_meta(stats) + self.landmark_type.to(device=device, dtype=dtype)
+        geometry_stats = landmark.geometry_stats.to(device=device, dtype=dtype)
+        if support_places:
+            support_embedding = mean_tensor(
+                [place.visual_prototype(device=device, dtype=dtype) for place in support_places],
+                semantic_embedding,
+            )
+        else:
+            support_embedding = semantic_embedding.new_zeros(semantic_embedding.shape)
+        fused = self.landmark_norm(
+            semantic_embedding
+            + self.landmark_meta(stats)
+            + self.landmark_geo(geometry_stats)
+            + support_embedding
+            + self.landmark_type.to(device=device, dtype=dtype)
+        )
+        if gate_mode == "learnable":
+            gate_value = self.landmark_learnable_gate.to(device=device, dtype=dtype).clamp(0.0, 1.0)
+        elif gate_mode == "constant":
+            gate_value = semantic_embedding.new_tensor(float(constant_gate)).clamp(0.0, 1.0)
+        else:
+            gate_value = semantic_embedding.new_tensor(float(landmark.confidence)).clamp(0.0, 1.0)
+        return gate_value * fused
 
     def encode_event(
         self,
@@ -272,10 +311,21 @@ class TopoMemoryGraph:
         self._step_new_nodes = 0
         self._step_merged_nodes = 0
         self._step_landmark_attachments = 0
+        self._raw_landmark_count = 0
+        self._filtered_low_conf_count = 0
+        self._landmark_text_rel_values: List[float] = []
+        self._landmark_geo_score_values: List[float] = []
+        self._landmark_visual_support_values: List[float] = []
+        self._last_retrieved_landmark_count = 0
+        self._last_retrieved_landmark_norm_mean = 0.0
+        self._last_retrieved_landmark_gate_avg = 0.0
         self._step_updated_nodes = 0
         self._step_created_goal_relevance: List[float] = []
         self._step_updated_goal_relevance: List[float] = []
         self._step_merged_goal_relevance: List[float] = []
+        self._step_created_goal_relevance_norm: List[float] = []
+        self._step_updated_goal_relevance_norm: List[float] = []
+        self._step_merged_goal_relevance_norm: List[float] = []
         self._last_update_stats: Dict[str, float] = {}
 
     def start_episode(
@@ -390,9 +440,10 @@ class TopoMemoryGraph:
         return value.clamp(0.0, 1.0)
 
     def _goal_relevance_score(self, goal_relevance: torch.Tensor) -> torch.Tensor:
-        """Map cosine-style instruction relevance from [-1, 1] to [0, 1]."""
+        """Map raw cosine relevance to a sharper [0, 1] score."""
 
-        return self._clamp01_tensor(0.5 * (goal_relevance + 1.0))
+        temperature = max(float(getattr(self.args, "goal_relevance_temperature", 0.10)), 1e-6)
+        return torch.sigmoid(goal_relevance / temperature).clamp(0.0, 1.0)
 
     def _normalized_novelty(self, novelty: torch.Tensor) -> torch.Tensor:
         """Use bounded visual novelty in create/retrieval bookkeeping."""
@@ -425,7 +476,7 @@ class TopoMemoryGraph:
     def _create_score(
         self,
         novelty: torch.Tensor,
-        goal_relevance: torch.Tensor,
+        goal_relevance_score: torch.Tensor,
         visual_change: torch.Tensor,
     ) -> torch.Tensor:
         """Goal-aware create score for turning observations into meaningful places."""
@@ -435,7 +486,7 @@ class TopoMemoryGraph:
         return self._weighted_unit_score(
             (
                 (getattr(self.args, "create_novelty_weight", 0.40), self._normalized_novelty(novelty)),
-                (getattr(self.args, "create_goal_weight", 0.40), self._goal_relevance_score(goal_relevance)),
+                (getattr(self.args, "create_goal_weight", 0.40), self._clamp01_tensor(goal_relevance_score)),
                 (getattr(self.args, "create_visual_weight", 0.20), self._clamp01_tensor(visual_change)),
             )
         )
@@ -538,6 +589,7 @@ class TopoMemoryGraph:
         feature_t: torch.Tensor,
         step_id: int,
         goal_relevance: torch.Tensor,
+        goal_relevance_score: torch.Tensor,
         novelty: torch.Tensor,
         landmark_names: Sequence[str],
     ) -> int:
@@ -558,11 +610,13 @@ class TopoMemoryGraph:
                 first_seen_step=step_id,
                 last_seen_step=step_id,
                 goal_relevance=float(goal_relevance.item()),
+                goal_relevance_norm=float(goal_relevance_score.item()),
                 novelty_score=float(novelty.item()),
             )
         )
         self._step_new_nodes += 1
         self._step_created_goal_relevance.append(float(goal_relevance.item()))
+        self._step_created_goal_relevance_norm.append(float(goal_relevance_score.item()))
         return place_id
 
     def _update_place_node(
@@ -573,6 +627,7 @@ class TopoMemoryGraph:
         feature_t: torch.Tensor,
         step_id: int,
         goal_relevance: torch.Tensor,
+        goal_relevance_score: torch.Tensor,
         novelty: torch.Tensor,
         landmark_names: Sequence[str],
     ) -> int:
@@ -589,6 +644,10 @@ class TopoMemoryGraph:
         previous_last_seen = place.last_seen_step
         place.last_seen_step = step_id
         place.goal_relevance = momentum * place.goal_relevance + (1.0 - momentum) * float(goal_relevance.item())
+        place.goal_relevance_norm = (
+            momentum * place.goal_relevance_norm
+            + (1.0 - momentum) * float(goal_relevance_score.item())
+        )
         place.novelty_score = momentum * place.novelty_score + (1.0 - momentum) * float(novelty.item())
         for name in landmark_names:
             if name and name not in place.observed_landmarks:
@@ -598,6 +657,7 @@ class TopoMemoryGraph:
             place.recent_patch_bank.pop(0)
         self._step_updated_nodes += 1
         self._step_updated_goal_relevance.append(float(goal_relevance.item()))
+        self._step_updated_goal_relevance_norm.append(float(goal_relevance_score.item()))
         if step_id - previous_last_seen > 1 and self._active_place_id is not None:
             self.reobservation_edges.append((self._active_place_id, place_id))
         return place_id
@@ -620,11 +680,191 @@ class TopoMemoryGraph:
         )
         self._next_event_id += 1
 
+    def _landmarks_enabled(self) -> bool:
+        """Return whether topo landmark nodes should be built or retrieved."""
+
+        return bool(getattr(self.args, "use_landmark_nodes", False)) and (
+            getattr(self.args, "topo_landmark_fusion_mode", "aux") != "off"
+        )
+
+    def _landmark_gate_value(self, landmark: LandmarkNode) -> float:
+        """Mirror GraphTokenEncoder gate selection for debug stats."""
+
+        gate_mode = getattr(self.args, "landmark_gate_mode", "confidence")
+        if gate_mode == "constant":
+            return max(0.0, min(1.0, float(getattr(self.args, "landmark_constant_gate", 0.2))))
+        if gate_mode == "learnable":
+            return max(0.0, min(1.0, float(self.token_encoder.landmark_learnable_gate.detach().item())))
+        return max(0.0, min(1.0, float(landmark.confidence)))
+
+    def _landmark_polygon_stats(
+        self,
+        polygon: Optional[Sequence[Sequence[float]]],
+        center_xy: torch.Tensor,
+    ) -> tuple[torch.Tensor, float, float]:
+        """Compute compact geometry stats and validity for a landmark polygon."""
+
+        device = center_xy.device
+        dtype = center_xy.dtype
+        zero_stats = torch.tensor(
+            [float(center_xy[0].item()), float(center_xy[1].item()), 0.0, 0.0, 0.0, 0.0],
+            device=device,
+            dtype=dtype,
+        )
+        center_valid = bool(torch.isfinite(center_xy).all().item()) and bool(
+            ((center_xy >= 0.0) & (center_xy <= 1.0)).all().item()
+        )
+        if not center_valid or polygon is None:
+            return zero_stats, 0.0, 0.0
+        try:
+            points = torch.tensor(polygon, device=device, dtype=dtype)
+        except (TypeError, ValueError):
+            return zero_stats, 0.0, 0.0
+        if points.dim() != 2 or points.shape[0] < 3 or points.shape[1] < 2 or not torch.isfinite(points).all():
+            return zero_stats, 0.0, 0.0
+        points = points[:, :2]
+        x = points[:, 0]
+        y = points[:, 1]
+        area = 0.5 * torch.abs(torch.dot(x, torch.roll(y, shifts=-1)) - torch.dot(y, torch.roll(x, shifts=-1)))
+        bbox_min = points.min(dim=0).values
+        bbox_max = points.max(dim=0).values
+        bbox = (bbox_max - bbox_min).clamp_min(0.0)
+        map_scale = max(float(getattr(self.args, "map_meters", 1.0)), 1.0)
+        area_norm = float((area / (map_scale * map_scale)).clamp_min(0.0).item())
+        bbox_w_norm = float((bbox[0] / map_scale).clamp_min(0.0).item())
+        bbox_h_norm = float((bbox[1] / map_scale).clamp_min(0.0).item())
+        # CityNav landmark contours are in map/world units while centers are normalized.
+        # Keep the geometry validity deliberately loose, then rely on confidence and top-k
+        # attachment to avoid large polygons becoming dense planning nodes.
+        geometry_validity = 1.0 if (area_norm > 1e-8 and area_norm <= 0.75) else 0.0
+        geometry_score = geometry_validity * max(0.0, min(1.0, 1.0 / (1.0 + math.sqrt(max(area_norm, 0.0)))))
+        stats = torch.tensor(
+            [
+                float(center_xy[0].item()),
+                float(center_xy[1].item()),
+                max(0.0, min(1.0, area_norm)),
+                max(0.0, min(1.0, bbox_w_norm)),
+                max(0.0, min(1.0, bbox_h_norm)),
+                geometry_validity,
+            ],
+            device=device,
+            dtype=dtype,
+        )
+        return stats, float(geometry_validity), float(geometry_score)
+
+    def _landmark_support_scores(self, place_id: int) -> tuple[float, float]:
+        """Estimate place and visual support using projected place/instruction relevance."""
+
+        place = self._place_by_id(place_id)
+        place_feature = place.visual_prototype(device=self.instruction_feat.device, dtype=self.instruction_feat.dtype)
+        place_relevance = safe_cosine_similarity(
+            place_feature.unsqueeze(0),
+            self.instruction_feat.unsqueeze(0),
+        ).squeeze(0)
+        support = float((0.5 * (place_relevance + 1.0)).clamp(0.0, 1.0).item())
+        if not bool(getattr(self.args, "landmark_use_visual_support", True)):
+            return support, 0.0
+        return support, support
+
+    def _landmark_confidence(
+        self,
+        instruction_relevance: float,
+        geometry_validity: float,
+        supporting_place_score: float,
+        visual_support_score: float,
+    ) -> float:
+        """Confidence filter for semantic landmarks before retrieval."""
+
+        terms = (
+            (0.4, instruction_relevance),
+            (0.2, geometry_validity),
+            (0.2, supporting_place_score),
+            (0.2, visual_support_score),
+        )
+        return max(0.0, min(1.0, sum(weight * max(0.0, min(1.0, value)) for weight, value in terms)))
+
+    def _landmark_attach_score(self, landmark: LandmarkNode, place: PlaceNode) -> tuple[float, float, float]:
+        """Score a sparse landmark-place attachment with geometry, instruction, and visual cues."""
+
+        if landmark.center_xy is None:
+            geo_score = 0.0
+        else:
+            center_xy = landmark.center_xy.to(device=place.center_xy.device, dtype=place.center_xy.dtype)
+            distance = torch.norm(place.center_xy - center_xy)
+            geo_score = float(score_to_similarity(distance, float(self.args.landmark_attach_radius)).item())
+            if float(distance.item()) <= float(self.args.landmark_attach_radius):
+                geo_score = max(geo_score, 0.75)
+        visual_score = 0.0
+        if bool(getattr(self.args, "landmark_use_visual_support", True)):
+            place_feature = place.visual_prototype(device=self.instruction_feat.device, dtype=self.instruction_feat.dtype)
+            rel = safe_cosine_similarity(
+                place_feature.unsqueeze(0),
+                self.instruction_feat.unsqueeze(0),
+            ).squeeze(0)
+            visual_score = float((0.5 * (rel + 1.0)).clamp(0.0, 1.0).item())
+        score = 0.45 * geo_score + 0.35 * float(landmark.instruction_relevance) + 0.20 * visual_score
+        return float(score), float(geo_score), float(visual_score)
+
+    def _refresh_landmark_attachments(self, landmark: LandmarkNode) -> None:
+        """Attach each landmark to a sparse, explainable top-k set of place nodes."""
+
+        if not self.place_nodes:
+            landmark.attached_place_ids = []
+            landmark.attached_place_scores = {}
+            return
+        max_degree = max(int(getattr(self.args, "max_landmark_degree", 3)), 1)
+        scored_places = []
+        for place in self.place_nodes:
+            attach_score, geo_score, visual_score = self._landmark_attach_score(landmark, place)
+            scored_places.append((place.node_id, attach_score, geo_score, visual_score))
+        scored_places.sort(key=lambda item: item[1], reverse=True)
+        kept = scored_places[:max_degree]
+        old_ids = set(landmark.attached_place_ids)
+        landmark.attached_place_ids = [place_id for place_id, _, _, _ in kept]
+        landmark.attached_place_scores = {place_id: score for place_id, score, _, _ in kept}
+        self._step_landmark_attachments += len(set(landmark.attached_place_ids) - old_ids)
+        self._landmark_geo_score_values.extend([geo_score for _, _, geo_score, _ in kept])
+        self._landmark_visual_support_values.extend([visual_score for _, _, _, visual_score in kept])
+
+    def _enforce_place_landmark_degree(self) -> None:
+        """Limit how many landmark anchors any one place keeps."""
+
+        if not self.landmark_nodes:
+            return
+        place_limit = max(int(getattr(self.args, "landmark_retrieve_k", 2)), 1)
+        place_to_landmarks: Dict[int, List[tuple[int, float]]] = {}
+        for landmark in self.landmark_nodes:
+            for place_id in landmark.attached_place_ids:
+                score = float(landmark.attached_place_scores.get(place_id, landmark.confidence))
+                place_to_landmarks.setdefault(place_id, []).append((landmark.landmark_id, score))
+        allowed = set()
+        for place_id, values in place_to_landmarks.items():
+            values.sort(key=lambda item: item[1], reverse=True)
+            for landmark_id, _ in values[:place_limit]:
+                allowed.add((landmark_id, place_id))
+        for landmark in self.landmark_nodes:
+            kept_ids = [place_id for place_id in landmark.attached_place_ids if (landmark.landmark_id, place_id) in allowed]
+            landmark.attached_place_ids = kept_ids
+            landmark.attached_place_scores = {
+                place_id: score
+                for place_id, score in landmark.attached_place_scores.items()
+                if place_id in kept_ids
+            }
+        self.semantic_edges = []
+        seen_edges = set()
+        for landmark in self.landmark_nodes:
+            for place_id in landmark.attached_place_ids:
+                edge = (place_id, landmark.landmark_id)
+                if edge not in seen_edges:
+                    self.semantic_edges.append(edge)
+                    seen_edges.add(edge)
+
     def _update_landmarks(self, place_id: int, step_id: int, landmark_info: Sequence[dict]) -> None:
         """Update persistent landmark nodes and semantic attachments."""
 
-        if not bool(self.args.use_landmark_nodes):
+        if not self._landmarks_enabled():
             return
+        self._raw_landmark_count += len(landmark_info)
         for item in landmark_info:
             name = item.get("name", "")
             if not name:
@@ -632,7 +872,8 @@ class TopoMemoryGraph:
             centroid = item.get("centroid")
             polygon = item.get("polygon")
             if centroid is None:
-                centroid_tensor = self._place_by_id(place_id).center_xy.clone()
+                self._filtered_low_conf_count += 1
+                continue
             elif isinstance(centroid, torch.Tensor):
                 centroid_tensor = centroid.to(device=self.instruction_feat.device, dtype=self.instruction_feat.dtype)
             else:
@@ -641,15 +882,40 @@ class TopoMemoryGraph:
                     device=self.instruction_feat.device,
                     dtype=self.instruction_feat.dtype,
                 )
+            if centroid_tensor.numel() < 2 or not torch.isfinite(centroid_tensor).all():
+                self._filtered_low_conf_count += 1
+                continue
+            centroid_tensor = centroid_tensor.flatten()[:2]
+            geometry_stats, geometry_validity, geometry_score = self._landmark_polygon_stats(polygon, centroid_tensor)
+            if geometry_validity <= 0.0:
+                self._filtered_low_conf_count += 1
+                continue
+            instruction_relevance = float(item.get("instruction_relevance", 1.0))
+            supporting_place_score, visual_support_score = self._landmark_support_scores(place_id)
+            confidence = self._landmark_confidence(
+                instruction_relevance,
+                geometry_validity,
+                supporting_place_score,
+                visual_support_score,
+            )
+            self._landmark_text_rel_values.append(instruction_relevance)
+            self._landmark_geo_score_values.append(geometry_score)
+            self._landmark_visual_support_values.append(visual_support_score)
+            if confidence < float(getattr(self.args, "landmark_conf_threshold", 0.35)):
+                self._filtered_low_conf_count += 1
+                continue
 
             if name in self._landmark_index:
                 landmark = self.landmark_nodes[self._landmark_index[name]]
                 landmark.last_seen_step = step_id
-                landmark.confidence = min(1.0, landmark.confidence + 0.1)
+                landmark.confidence = max(float(landmark.confidence), confidence)
                 landmark.center_xy = centroid_tensor
-                if place_id not in landmark.attached_place_ids:
-                    landmark.attached_place_ids.append(place_id)
-                    self._step_landmark_attachments += 1
+                landmark.polygon = polygon
+                landmark.geometry_stats = geometry_stats
+                landmark.instruction_relevance = max(float(landmark.instruction_relevance), instruction_relevance)
+                landmark.geometry_validity = geometry_validity
+                landmark.supporting_place_score = max(float(landmark.supporting_place_score), supporting_place_score)
+                landmark.visual_support_score = max(float(landmark.visual_support_score), visual_support_score)
             else:
                 if len(self.landmark_nodes) >= int(self.args.max_landmark_nodes):
                     continue
@@ -660,16 +926,22 @@ class TopoMemoryGraph:
                         text_tag=name,
                         polygon=polygon,
                         semantic_embedding=self.instruction_feat.clone(),
-                        attached_place_ids=[place_id],
-                        confidence=0.5,
+                        geometry_stats=geometry_stats,
+                        attached_place_ids=[],
+                        attached_place_scores={},
+                        confidence=confidence,
+                        instruction_relevance=instruction_relevance,
+                        geometry_validity=geometry_validity,
+                        supporting_place_score=supporting_place_score,
+                        visual_support_score=visual_support_score,
                         last_seen_step=step_id,
                         center_xy=centroid_tensor,
                     )
                 )
                 self._landmark_index[name] = landmark_id
-                self._step_landmark_attachments += 1
                 self._create_event("first_landmark", place_id, step_id, 0.5)
-            self.semantic_edges.append((place_id, self._landmark_index[name]))
+            self._refresh_landmark_attachments(self.landmark_nodes[self._landmark_index[name]])
+        self._enforce_place_landmark_degree()
 
     def _remap_edges(self, remove_id: int, keep_id: int) -> None:
         """Redirect persistent edges after a node merge."""
@@ -723,7 +995,7 @@ class TopoMemoryGraph:
             max_visit = max(float(node.visit_count) for node in self.place_nodes)
             importance = torch.tensor(
                 [
-                    0.50 * max(0.0, min(1.0, 0.5 * (node.goal_relevance + 1.0)))
+                    0.50 * max(0.0, min(1.0, float(node.goal_relevance_norm)))
                     + 0.30 * (float(node.visit_count) / max(max_visit, 1.0))
                     + 0.15 * max(0.0, min(1.0, float(node.novelty_score)))
                     + (0.05 if node.node_id == self._active_place_id else 0.0)
@@ -744,6 +1016,10 @@ class TopoMemoryGraph:
             keep_node.visual_count += remove_node.visual_count
             keep_node.visit_count += remove_node.visit_count
             keep_node.goal_relevance = max(keep_node.goal_relevance, remove_node.goal_relevance)
+            keep_node.goal_relevance_norm = max(
+                keep_node.goal_relevance_norm,
+                remove_node.goal_relevance_norm,
+            )
             keep_node.novelty_score = max(keep_node.novelty_score, remove_node.novelty_score)
             keep_node.observed_landmarks = sorted(
                 set(keep_node.observed_landmarks + remove_node.observed_landmarks)
@@ -757,11 +1033,15 @@ class TopoMemoryGraph:
             keep_id = keep_node.node_id
             for landmark in self.landmark_nodes:
                 updated_ids: List[int] = []
+                updated_scores: Dict[int, float] = {}
                 for place_id in landmark.attached_place_ids:
                     mapped = keep_id if place_id == remove_id else place_id
                     if mapped not in updated_ids:
                         updated_ids.append(mapped)
+                    score = float(landmark.attached_place_scores.get(place_id, landmark.confidence))
+                    updated_scores[mapped] = max(score, float(updated_scores.get(mapped, 0.0)))
                 landmark.attached_place_ids = updated_ids
+                landmark.attached_place_scores = updated_scores
             for event in self.event_nodes:
                 if event.attached_place_id == remove_id:
                     event.attached_place_id = keep_id
@@ -771,6 +1051,7 @@ class TopoMemoryGraph:
             del self.place_nodes[remove_slot]
             self._step_merged_nodes += 1
             self._step_merged_goal_relevance.append(float(remove_node.goal_relevance))
+            self._step_merged_goal_relevance_norm.append(float(remove_node.goal_relevance_norm))
 
     def _refresh_spatial_edges(self) -> None:
         """Refresh sparse spatial edges after an incremental update."""
@@ -804,6 +1085,9 @@ class TopoMemoryGraph:
         self._step_created_goal_relevance = []
         self._step_updated_goal_relevance = []
         self._step_merged_goal_relevance = []
+        self._step_created_goal_relevance_norm = []
+        self._step_updated_goal_relevance_norm = []
+        self._step_merged_goal_relevance_norm = []
 
         base_xy = self.base_positions[int(cell_id)]
         if xy is not None and torch.isfinite(xy).all():
@@ -830,7 +1114,12 @@ class TopoMemoryGraph:
         novelty_score = self._normalized_novelty(novelty)
         goal_relevance_score = self._goal_relevance_score(goal_relevance)
         visual_change = self._active_visual_change(feature_t)
-        create_score = self._create_score(novelty, goal_relevance, visual_change)
+        create_score = self._create_score(novelty, goal_relevance_score, visual_change)
+        goal_relevance_value = float(goal_relevance.item())
+        goal_relevance_score_value = float(goal_relevance_score.item())
+        novelty_score_value = float(novelty_score.item())
+        visual_change_value = float(visual_change.item())
+        create_score_value = float(create_score.item())
 
         heading_vec = feature_t.new_zeros(2)
         heading_change_deg = 0.0
@@ -880,16 +1169,13 @@ class TopoMemoryGraph:
                 feature_t,
                 step_id,
                 goal_relevance,
+                goal_relevance_score,
                 novelty,
                 landmark_names,
             )
         else:
             best_place_id, best_score_tensor = max(association_scores, key=lambda item: float(item[1].item()))
             best_assoc = float(best_score_tensor.item())
-            raw_goal_relevance = float(goal_relevance.item())
-            novelty_value = float(novelty_score.item())
-            visual_change_value = float(visual_change.item())
-            create_score_value = float(create_score.item())
             spatial_create = (
                 bool(proposal_flags.get("spatial_shift", False))
                 or bool(proposal_flags.get("merge_radius", False))
@@ -902,12 +1188,12 @@ class TopoMemoryGraph:
             merge_unreliable = best_assoc < float(self.args.topo_merge_sim_threshold)
             base_create = spatial_create or visual_create or turn_create or merge_unreliable
 
-            goal_create_high_threshold = float(getattr(self.args, "goal_create_high_threshold", 0.25))
+            goal_create_norm_threshold = float(getattr(self.args, "goal_create_norm_threshold", 0.55))
             visual_change_low_threshold = float(
                 getattr(self.args, "goal_visual_change_low_threshold", 0.18)
             )
             goal_boost_create = (
-                raw_goal_relevance > goal_create_high_threshold
+                goal_relevance_score_value > goal_create_norm_threshold
                 and visual_change_value > visual_change_low_threshold
             )
             create_new = base_create or goal_boost_create
@@ -925,6 +1211,7 @@ class TopoMemoryGraph:
                     feature_t,
                     step_id,
                     goal_relevance,
+                    goal_relevance_score,
                     novelty,
                     landmark_names,
                 )
@@ -936,22 +1223,23 @@ class TopoMemoryGraph:
                     feature_t,
                     step_id,
                     goal_relevance,
+                    goal_relevance_score,
                     novelty,
                     landmark_names,
                 )
 
         if self._active_place_id is not None and self._active_place_id != selected_place_id:
             self.temporal_edges.append((self._active_place_id, selected_place_id))
-            self._create_event("branch", selected_place_id, step_id, float(goal_relevance.item()))
+            self._create_event("branch", selected_place_id, step_id, goal_relevance_value)
         self._active_place_id = selected_place_id
 
         if heading_change_deg >= float(self.args.turn_event_threshold_deg):
             self._create_event("turn", selected_place_id, step_id, heading_change_deg / 180.0)
         if self._prev_goal_relevance is not None:
-            jump = abs(float(goal_relevance.item()) - self._prev_goal_relevance)
+            jump = abs(goal_relevance_value - self._prev_goal_relevance)
             if jump >= float(self.args.relevance_jump_threshold):
                 self._create_event("relevance_jump", selected_place_id, step_id, jump)
-        self._prev_goal_relevance = float(goal_relevance.item())
+        self._prev_goal_relevance = goal_relevance_value
 
         self._update_landmarks(selected_place_id, step_id, landmark_info)
         self._enforce_max_place_nodes()
@@ -960,6 +1248,11 @@ class TopoMemoryGraph:
         self._prev_xy = xy_t
 
         update_denominator = max(float(self._step_new_nodes + self._step_updated_nodes), 1.0)
+        spatial_create_goal_norm = goal_relevance_score_value if spatial_create else float("nan")
+        visual_create_goal_norm = goal_relevance_score_value if visual_create else float("nan")
+        turn_create_goal_norm = goal_relevance_score_value if turn_create else float("nan")
+        merge_unreliable_goal_norm = goal_relevance_score_value if merge_unreliable else float("nan")
+        goal_boost_goal_norm = goal_relevance_score_value if goal_boost_create else float("nan")
         self._last_update_stats = {
             "active_place_id": float(selected_place_id),
             "step_new_place_nodes": float(self._step_new_nodes),
@@ -976,26 +1269,55 @@ class TopoMemoryGraph:
             "create_place_nodes_count": float(self._step_new_nodes),
             "merge_place_nodes_count": float(self._step_merged_nodes),
             "update_existing_place_nodes_count": float(self._step_updated_nodes),
-            "goal_relevance": float(goal_relevance.item()),
-            "goal_relevance_score": float(goal_relevance_score.item()),
+            "goal_relevance": goal_relevance_value,
+            "goal_relevance_score": goal_relevance_score_value,
+            "goal_rel_raw_avg": goal_relevance_value,
+            "goal_rel_raw_min": goal_relevance_value,
+            "goal_rel_raw_max": goal_relevance_value,
+            "goal_rel_norm_avg": goal_relevance_score_value,
+            "goal_rel_norm_min": goal_relevance_score_value,
+            "goal_rel_norm_max": goal_relevance_score_value,
             "created_goal_relevance": self._mean_float_or_nan(self._step_created_goal_relevance),
             "updated_goal_relevance": self._mean_float_or_nan(self._step_updated_goal_relevance),
             "merged_goal_relevance": self._mean_float_or_nan(self._step_merged_goal_relevance),
+            "created_goal_relevance_norm": self._mean_float_or_nan(self._step_created_goal_relevance_norm),
+            "updated_goal_relevance_norm": self._mean_float_or_nan(self._step_updated_goal_relevance_norm),
+            "merged_goal_relevance_norm": self._mean_float_or_nan(self._step_merged_goal_relevance_norm),
+            "created_goal_raw": self._mean_float_or_nan(self._step_created_goal_relevance),
+            "updated_goal_raw": self._mean_float_or_nan(self._step_updated_goal_relevance),
+            "merged_goal_raw": self._mean_float_or_nan(self._step_merged_goal_relevance),
+            "created_goal_norm": self._mean_float_or_nan(self._step_created_goal_relevance_norm),
+            "updated_goal_norm": self._mean_float_or_nan(self._step_updated_goal_relevance_norm),
+            "merged_goal_norm": self._mean_float_or_nan(self._step_merged_goal_relevance_norm),
             "goal_relevance_of_created_nodes": self._mean_float_or_nan(self._step_created_goal_relevance),
             "goal_relevance_of_updated_nodes": self._mean_float_or_nan(self._step_updated_goal_relevance),
             "goal_relevance_of_merged_nodes": self._mean_float_or_nan(self._step_merged_goal_relevance),
-            "novelty_score": float(novelty_score.item()),
-            "visual_change": float(visual_change.item()),
+            "goal_relevance_norm_of_created_nodes": self._mean_float_or_nan(self._step_created_goal_relevance_norm),
+            "goal_relevance_norm_of_updated_nodes": self._mean_float_or_nan(self._step_updated_goal_relevance_norm),
+            "goal_relevance_norm_of_merged_nodes": self._mean_float_or_nan(self._step_merged_goal_relevance_norm),
+            "novelty_score": novelty_score_value,
+            "visual_change": visual_change_value,
             "best_association_score": float(best_assoc),
             "base_create": float(base_create),
             "goal_boost_create": float(goal_boost_create),
+            "goal_boost_fire_rate": float(goal_boost_create),
             "final_create": float(create_new),
             "spatial_create": float(spatial_create),
             "visual_create": float(visual_create),
             "turn_create": float(turn_create),
             "merge_unreliable": float(merge_unreliable),
+            "spatial_create_rate": float(spatial_create),
+            "visual_create_rate": float(visual_create),
+            "turn_create_rate": float(turn_create),
+            "merge_unreliable_rate": float(merge_unreliable),
+            "goal_boost_create_rate": float(goal_boost_create),
+            "spatial_create_goal_norm": spatial_create_goal_norm,
+            "visual_create_goal_norm": visual_create_goal_norm,
+            "turn_create_goal_norm": turn_create_goal_norm,
+            "merge_unreliable_goal_norm": merge_unreliable_goal_norm,
+            "goal_boost_goal_norm": goal_boost_goal_norm,
             "event_debug_create": float(event_debug_create),
-            "create_score": float(create_score.item()),
+            "create_score": create_score_value,
             "create_rate": float(self._step_new_nodes) / update_denominator,
             "update_rate": float(self._step_updated_nodes) / update_denominator,
             "merge_rate": float(self._step_merged_nodes) / update_denominator,
@@ -1055,6 +1377,68 @@ class TopoMemoryGraph:
                 time_decay_rate=time_decay_rate,
             )
 
+    def _select_landmarks_for_places(
+        self,
+        place_ids: Sequence[int],
+        limit: Optional[int] = None,
+        active_only: bool = False,
+    ) -> List[LandmarkNode]:
+        """Retrieve landmark anchors attached to already-selected place nodes."""
+
+        if not self._landmarks_enabled() or not self.landmark_nodes:
+            return []
+        if limit is None:
+            limit = int(getattr(self.args, "landmark_retrieve_k", 2))
+        if limit <= 0:
+            return []
+        selected_place_ids = set(place_ids)
+        if active_only and place_ids:
+            selected_place_ids = {int(place_ids[0])}
+        threshold = float(getattr(self.args, "landmark_conf_threshold", 0.35))
+        candidates = []
+        for landmark in self.landmark_nodes:
+            attached = selected_place_ids.intersection(landmark.attached_place_ids)
+            if not attached or float(landmark.confidence) < threshold:
+                continue
+            attach_score = max(
+                float(landmark.attached_place_scores.get(place_id, 0.0))
+                for place_id in attached
+            )
+            score = 0.65 * float(landmark.confidence) + 0.35 * attach_score
+            candidates.append((score, landmark))
+        candidates.sort(key=lambda item: item[0], reverse=True)
+        return [landmark for _, landmark in candidates[:limit]]
+
+    def _encode_landmark_tokens(
+        self,
+        landmarks: Sequence[LandmarkNode],
+        device: torch.device,
+        dtype: torch.dtype,
+        fallback: torch.Tensor,
+    ) -> torch.Tensor:
+        """Encode selected landmark anchors with attached place support."""
+
+        tokens = []
+        for landmark in landmarks:
+            support_places = [
+                self._place_by_id(place_id)
+                for place_id in landmark.attached_place_ids
+                if any(place.node_id == place_id for place in self.place_nodes)
+            ]
+            tokens.append(
+                self.token_encoder.encode_landmark(
+                    landmark,
+                    support_places=support_places,
+                    gate_mode=getattr(self.args, "landmark_gate_mode", "confidence"),
+                    constant_gate=float(getattr(self.args, "landmark_constant_gate", 0.2)),
+                    device=device,
+                    dtype=dtype,
+                )
+            )
+        if not tokens:
+            return fallback.new_zeros((0, fallback.shape[-1]))
+        return torch.stack(tokens, dim=0)
+
     def retrieve_global_graph_tokens(
         self,
         instruction_feat: torch.Tensor,
@@ -1090,6 +1474,25 @@ class TopoMemoryGraph:
                     name="retrieve_global_graph_tokens.event_tokens[empty]",
                 ),
                 "retrieval_scores": empty_tokens.new_zeros((0,)),
+                "retrieval_goal_raw_avg": float("nan"),
+                "retrieval_goal_norm_avg": float("nan"),
+                "retrieval_goal_norm_min": float("nan"),
+                "retrieval_goal_norm_max": float("nan"),
+                "topk_goal_norm_mean": float("nan"),
+                "retrieval_topk_goal_norm": float("nan"),
+                "retrieval_non_topk_goal_norm": float("nan"),
+                "retrieval_goal_component_avg": float("nan"),
+                "retrieval_visual_component_avg": float("nan"),
+                "retrieval_visit_component_avg": float("nan"),
+                "topk_goal_component_avg": float("nan"),
+                "topk_visual_component_avg": float("nan"),
+                "topk_visit_component_avg": float("nan"),
+                "non_topk_goal_component_avg": float("nan"),
+                "non_topk_visual_component_avg": float("nan"),
+                "non_topk_visit_component_avg": float("nan"),
+                "topk_goal_largest_component_rate": float("nan"),
+                "topk_visual_largest_component_rate": float("nan"),
+                "topk_visit_largest_component_rate": float("nan"),
             }
 
         ranked_ids = []
@@ -1097,8 +1500,12 @@ class TopoMemoryGraph:
             current_feature = self.fallback_feature
         current_feature = self._to_device(current_feature, device, hidden_dtype)
         max_visit = max(float(place.visit_count) for place in self.place_nodes)
+        retrieve_goal_weight = float(getattr(self.args, "retrieve_goal_weight", 0.50))
+        retrieve_visual_weight = float(getattr(self.args, "retrieve_visual_weight", 0.30))
+        retrieve_visit_weight = float(getattr(self.args, "retrieve_visit_weight", 0.20))
         for place in self.place_nodes:
-            goal_score = max(0.0, min(1.0, 0.5 * (float(place.goal_relevance) + 1.0)))
+            goal_raw = float(place.goal_relevance)
+            goal_score = max(0.0, min(1.0, float(place.goal_relevance_norm)))
             visual_score = 0.5 * (
                 safe_cosine_similarity(
                     place.visual_prototype(device=device, dtype=hidden_dtype).unsqueeze(0),
@@ -1107,18 +1514,54 @@ class TopoMemoryGraph:
                 + 1.0
             )
             visit_score = float(place.visit_count) / max(max_visit, 1.0)
-            score = (
-                float(getattr(self.args, "retrieve_goal_weight", 0.50)) * goal_score
-                + float(getattr(self.args, "retrieve_visual_weight", 0.30)) * visual_score
-                + float(getattr(self.args, "retrieve_visit_weight", 0.20)) * visit_score
+            goal_component = retrieve_goal_weight * goal_score
+            visual_component = retrieve_visual_weight * visual_score
+            visit_component = retrieve_visit_weight * visit_score
+            score = goal_component + visual_component + visit_component
+            ranked_ids.append(
+                (
+                    place.node_id,
+                    score,
+                    goal_raw,
+                    goal_score,
+                    goal_component,
+                    visual_component,
+                    visit_component,
+                )
             )
-            ranked_ids.append((place.node_id, score))
         ranked_ids.sort(key=lambda item: item[1], reverse=True)
         top_k = min(max(int(k), 1), len(ranked_ids))
         selected_ranked = ranked_ids[:top_k]
-        selected_ids = [node_id for node_id, _ in selected_ranked]
+        selected_ids = [node_id for node_id, _, _, _, _, _, _ in selected_ranked]
         selected_places = [self._place_by_id(node_id) for node_id in selected_ids]
-        retrieval_scores = torch.tensor([score for _, score in selected_ranked], device=device, dtype=hidden_dtype)
+        retrieval_scores = torch.tensor(
+            [score for _, score, _, _, _, _, _ in selected_ranked],
+            device=device,
+            dtype=hidden_dtype,
+        )
+        all_goal_raw = [goal_raw for _, _, goal_raw, _, _, _, _ in ranked_ids]
+        all_goal_norm = [goal_norm for _, _, _, goal_norm, _, _, _ in ranked_ids]
+        all_goal_components = [goal_component for _, _, _, _, goal_component, _, _ in ranked_ids]
+        all_visual_components = [visual_component for _, _, _, _, _, visual_component, _ in ranked_ids]
+        all_visit_components = [visit_component for _, _, _, _, _, _, visit_component in ranked_ids]
+        selected_goal_norm = [goal_norm for _, _, _, goal_norm, _, _, _ in selected_ranked]
+        selected_goal_components = [goal_component for _, _, _, _, goal_component, _, _ in selected_ranked]
+        selected_visual_components = [visual_component for _, _, _, _, _, visual_component, _ in selected_ranked]
+        selected_visit_components = [visit_component for _, _, _, _, _, _, visit_component in selected_ranked]
+        non_topk_ranked = ranked_ids[top_k:]
+        non_topk_goal_norm = [goal_norm for _, _, _, goal_norm, _, _, _ in non_topk_ranked]
+        non_topk_goal_components = [goal_component for _, _, _, _, goal_component, _, _ in non_topk_ranked]
+        non_topk_visual_components = [visual_component for _, _, _, _, _, visual_component, _ in non_topk_ranked]
+        non_topk_visit_components = [visit_component for _, _, _, _, _, _, visit_component in non_topk_ranked]
+        selected_largest_components = []
+        for _, _, _, _, goal_component, visual_component, visit_component in selected_ranked:
+            if goal_component >= visual_component and goal_component >= visit_component:
+                selected_largest_components.append("goal")
+            elif visual_component >= visit_component:
+                selected_largest_components.append("visual")
+            else:
+                selected_largest_components.append("visit")
+        selected_largest_denominator = max(float(len(selected_largest_components)), 1.0)
 
         place_tokens = self._normalize_feature_matrix(
             torch.stack(
@@ -1134,11 +1577,20 @@ class TopoMemoryGraph:
         place_ids = torch.tensor(selected_ids, device=device, dtype=torch.long)
         selected_set = set(selected_ids)
 
-        landmark_tokens = [
-            self.token_encoder.encode_landmark(landmark, device=device, dtype=hidden_dtype)
-            for landmark in self.landmark_nodes
-            if selected_set.intersection(landmark.attached_place_ids)
-        ]
+        selected_landmarks = self._select_landmarks_for_places(
+            selected_ids,
+            limit=int(getattr(self.args, "landmark_retrieve_k", 2)),
+            active_only=False,
+        )
+        landmark_tokens_tensor = self._normalize_feature_matrix(
+            self._encode_landmark_tokens(selected_landmarks, device, hidden_dtype, place_tokens),
+            name="retrieve_global_graph_tokens.landmark_tokens",
+        )
+        self._last_retrieved_landmark_count = int(landmark_tokens_tensor.shape[0])
+        self._last_retrieved_landmark_norm_mean = self._token_norm_stats(landmark_tokens_tensor)["mean"]
+        self._last_retrieved_landmark_gate_avg = self._mean_float(
+            [self._landmark_gate_value(landmark) for landmark in selected_landmarks]
+        )
         ref_step = max(place.last_seen_step for place in self.place_nodes)
         event_tokens = [
             self.token_encoder.encode_event(event, ref_step, hidden_dtype, device)
@@ -1149,15 +1601,34 @@ class TopoMemoryGraph:
             "place_tokens": place_tokens,
             "place_positions": place_positions,
             "place_ids": place_ids,
-            "landmark_tokens": self._normalize_feature_matrix(
-                torch.stack(landmark_tokens, dim=0) if landmark_tokens else place_tokens.new_zeros((0, place_tokens.shape[-1])),
-                name="retrieve_global_graph_tokens.landmark_tokens",
-            ),
+            "landmark_tokens": landmark_tokens_tensor,
             "event_tokens": self._normalize_feature_matrix(
                 torch.stack(event_tokens, dim=0) if event_tokens else place_tokens.new_zeros((0, place_tokens.shape[-1])),
                 name="retrieve_global_graph_tokens.event_tokens",
             ),
+            "retrieved_landmark_count": float(landmark_tokens_tensor.shape[0]),
+            "landmark_token_norm_mean": self._last_retrieved_landmark_norm_mean,
+            "landmark_gate_avg": self._last_retrieved_landmark_gate_avg,
             "retrieval_scores": retrieval_scores,
+            "retrieval_goal_raw_avg": self._mean_float_or_nan(all_goal_raw),
+            "retrieval_goal_norm_avg": self._mean_float_or_nan(all_goal_norm),
+            "retrieval_goal_norm_min": min(all_goal_norm) if all_goal_norm else float("nan"),
+            "retrieval_goal_norm_max": max(all_goal_norm) if all_goal_norm else float("nan"),
+            "topk_goal_norm_mean": self._mean_float_or_nan(selected_goal_norm),
+            "retrieval_topk_goal_norm": self._mean_float_or_nan(selected_goal_norm),
+            "retrieval_non_topk_goal_norm": self._mean_float_or_nan(non_topk_goal_norm),
+            "retrieval_goal_component_avg": self._mean_float_or_nan(all_goal_components),
+            "retrieval_visual_component_avg": self._mean_float_or_nan(all_visual_components),
+            "retrieval_visit_component_avg": self._mean_float_or_nan(all_visit_components),
+            "topk_goal_component_avg": self._mean_float_or_nan(selected_goal_components),
+            "topk_visual_component_avg": self._mean_float_or_nan(selected_visual_components),
+            "topk_visit_component_avg": self._mean_float_or_nan(selected_visit_components),
+            "non_topk_goal_component_avg": self._mean_float_or_nan(non_topk_goal_components),
+            "non_topk_visual_component_avg": self._mean_float_or_nan(non_topk_visual_components),
+            "non_topk_visit_component_avg": self._mean_float_or_nan(non_topk_visit_components),
+            "topk_goal_largest_component_rate": float(selected_largest_components.count("goal")) / selected_largest_denominator,
+            "topk_visual_largest_component_rate": float(selected_largest_components.count("visual")) / selected_largest_denominator,
+            "topk_visit_largest_component_rate": float(selected_largest_components.count("visit")) / selected_largest_denominator,
         }
 
     def retrieve_local_subgraph_tokens(
@@ -1237,11 +1708,22 @@ class TopoMemoryGraph:
             hidden_dtype,
         )
 
-        landmark_tokens = [
-            self.token_encoder.encode_landmark(landmark, device=device, dtype=hidden_dtype)
-            for landmark in self.landmark_nodes
-            if set(landmark.attached_place_ids).intersection(ordered_ids)
-        ]
+        if bool(getattr(self.args, "landmark_as_auxiliary", True)):
+            selected_local_landmarks = self._select_landmarks_for_places(
+                [active_node_id],
+                limit=int(getattr(self.args, "landmark_retrieve_k", 2)),
+                active_only=True,
+            )
+        else:
+            selected_local_landmarks = self._select_landmarks_for_places(
+                ordered_ids,
+                limit=int(getattr(self.args, "landmark_retrieve_k", 2)),
+                active_only=False,
+            )
+        landmark_tokens_tensor = self._normalize_feature_matrix(
+            self._encode_landmark_tokens(selected_local_landmarks, device, hidden_dtype, place_tokens),
+            name="retrieve_local_subgraph_tokens.landmark_tokens",
+        )
         ref_step = max(place.last_seen_step for place in self.place_nodes)
         event_tokens = [
             self.token_encoder.encode_event(event, ref_step, hidden_dtype, device)
@@ -1249,13 +1731,8 @@ class TopoMemoryGraph:
             if event.attached_place_id in connected_ids
         ]
         local_tokens = [place_tokens]
-        if landmark_tokens:
-            local_tokens.append(
-                self._normalize_feature_matrix(
-                    torch.stack(landmark_tokens, dim=0),
-                    name="retrieve_local_subgraph_tokens.landmark_tokens",
-                )
-            )
+        if landmark_tokens_tensor.shape[0] > 0:
+            local_tokens.append(landmark_tokens_tensor)
         if event_tokens:
             local_tokens.append(
                 self._normalize_feature_matrix(
@@ -1281,7 +1758,50 @@ class TopoMemoryGraph:
             "patch_summary": patch_summary,
             "local_place_count": float(len(ordered_places)),
             "local_token_count": float(local_tokens_cat.shape[0]),
+            "local_landmark_count": float(landmark_tokens_tensor.shape[0]),
             "active_node_valid": float(active_node_valid),
+        }
+
+    def _landmark_debug_stats(self, place_token_count: int = 0) -> Dict[str, float]:
+        """Summarize landmark filtering, retrieval, attachment density, and token scale."""
+
+        if not self._landmarks_enabled():
+            return {}
+        degrees = [len(landmark.attached_place_ids) for landmark in self.landmark_nodes]
+        confidences = [float(landmark.confidence) for landmark in self.landmark_nodes]
+        attached_edges = float(sum(degrees))
+        place_count = max(len(self.place_nodes), 1)
+        landmark_count = max(len(self.landmark_nodes), 1)
+        all_to_all = bool(
+            self.landmark_nodes
+            and len(self.place_nodes) > 1
+            and attached_edges >= float(len(self.landmark_nodes) * len(self.place_nodes))
+        )
+        retrieved = float(self._last_retrieved_landmark_count)
+        return {
+            "raw_landmark_count": float(self._raw_landmark_count),
+            "valid_landmark_count": float(len(self.landmark_nodes)),
+            "retrieved_landmark_count": retrieved,
+            "attached_landmark_edges": attached_edges,
+            "avg_landmark_degree": self._mean_float([float(value) for value in degrees]),
+            "max_landmark_degree": float(max(degrees) if degrees else 0.0),
+            "landmark_conf_avg": self._mean_float(confidences),
+            "landmark_conf_min": float(min(confidences) if confidences else 0.0),
+            "landmark_conf_max": float(max(confidences) if confidences else 0.0),
+            "landmark_conf_range": float((max(confidences) - min(confidences)) if confidences else 0.0),
+            "landmark_text_rel_avg": self._mean_float(self._landmark_text_rel_values),
+            "landmark_geo_score_avg": self._mean_float(self._landmark_geo_score_values),
+            "landmark_visual_support_avg": self._mean_float(self._landmark_visual_support_values),
+            "landmark_token_norm_mean": float(self._last_retrieved_landmark_norm_mean),
+            "landmark_gate_avg": float(self._last_retrieved_landmark_gate_avg),
+            "landmark_place_token_ratio": retrieved / max(float(place_token_count), 1.0),
+            "landmark_empty_ratio": 1.0 if retrieved <= 0.0 else 0.0,
+            "landmark_filtered_low_conf_count": float(self._filtered_low_conf_count),
+            "landmark_all_to_all_detected": float(all_to_all),
+            "landmark_degree_budget": float(getattr(self.args, "max_landmark_degree", 3)),
+            "landmark_place_degree_budget": float(getattr(self.args, "landmark_retrieve_k", 2)),
+            "landmark_node_density": float(len(self.landmark_nodes)) / float(place_count),
+            "landmark_per_place_budget_ratio": attached_edges / float(place_count * landmark_count),
         }
 
     def export_for_transformer(
@@ -1350,9 +1870,39 @@ class TopoMemoryGraph:
                     "retrieval_coverage": 0.0,
                     "avg_goal_relevance": 0.0,
                     "max_goal_relevance": 0.0,
-                    "created_goal_relevance": 0.0,
-                    "updated_goal_relevance": 0.0,
-                    "merged_goal_relevance": 0.0,
+                    "avg_goal_relevance_norm": float("nan"),
+                    "max_goal_relevance_norm": float("nan"),
+                    "created_goal_relevance": float("nan"),
+                    "updated_goal_relevance": float("nan"),
+                    "merged_goal_relevance": float("nan"),
+                    "created_goal_relevance_norm": float("nan"),
+                    "updated_goal_relevance_norm": float("nan"),
+                    "merged_goal_relevance_norm": float("nan"),
+                    "created_goal_raw": float("nan"),
+                    "updated_goal_raw": float("nan"),
+                    "merged_goal_raw": float("nan"),
+                    "created_goal_norm": float("nan"),
+                    "updated_goal_norm": float("nan"),
+                    "merged_goal_norm": float("nan"),
+                    "retrieval_goal_raw_avg": float("nan"),
+                    "retrieval_goal_norm_avg": float("nan"),
+                    "retrieval_goal_norm_min": float("nan"),
+                    "retrieval_goal_norm_max": float("nan"),
+                    "retrieval_topk_goal_norm": float("nan"),
+                    "retrieval_non_topk_goal_norm": float("nan"),
+                    "topk_goal_norm_mean": float("nan"),
+                    "retrieval_goal_component_avg": float("nan"),
+                    "retrieval_visual_component_avg": float("nan"),
+                    "retrieval_visit_component_avg": float("nan"),
+                    "topk_goal_component_avg": float("nan"),
+                    "topk_visual_component_avg": float("nan"),
+                    "topk_visit_component_avg": float("nan"),
+                    "non_topk_goal_component_avg": float("nan"),
+                    "non_topk_visual_component_avg": float("nan"),
+                    "non_topk_visit_component_avg": float("nan"),
+                    "topk_goal_largest_component_rate": float("nan"),
+                    "topk_visual_largest_component_rate": float("nan"),
+                    "topk_visit_largest_component_rate": float("nan"),
                     "global_token_count": 0.0,
                     "local_token_count": 0.0,
                     "topo_token_norm_mean": 0.0,
@@ -1466,6 +2016,7 @@ class TopoMemoryGraph:
             "active_place_id": float(self._active_place_id) if self._active_place_id is not None else -1.0,
         }
         goal_relevances = [float(place.goal_relevance) for place in self.place_nodes]
+        goal_relevances_norm = [float(place.goal_relevance_norm) for place in self.place_nodes]
         local_tokens = local_out["local_tokens"]
         global_norm_stats = self._token_norm_stats(place_tokens)
         local_norm_stats = self._token_norm_stats(local_tokens)
@@ -1480,15 +2031,46 @@ class TopoMemoryGraph:
             {
                 "global_retrieved_nodes": float(place_tokens.shape[0]),
                 "local_retrieved_nodes": float(local_out.get("local_place_count", 0.0)),
+                "local_retrieved_landmark_count": float(local_out.get("local_landmark_count", 0.0)),
                 "active_node_valid_ratio": float(local_out.get("active_node_valid", 0.0)),
                 "empty_retrieval_ratio": 0.0 if place_tokens.shape[0] > 0 else 1.0,
                 "node_saturation_ratio": float(len(self.place_nodes)) / max(float(self.args.max_place_nodes), 1.0),
                 "retrieval_coverage": float(place_tokens.shape[0]) / max(float(len(self.place_nodes)), 1.0),
                 "avg_goal_relevance": self._mean_float(goal_relevances),
                 "max_goal_relevance": max(goal_relevances) if goal_relevances else 0.0,
+                "avg_goal_relevance_norm": self._mean_float_or_nan(goal_relevances_norm),
+                "max_goal_relevance_norm": max(goal_relevances_norm) if goal_relevances_norm else float("nan"),
                 "created_goal_relevance": self._mean_float_or_nan(self._step_created_goal_relevance),
                 "updated_goal_relevance": self._mean_float_or_nan(self._step_updated_goal_relevance),
                 "merged_goal_relevance": self._mean_float_or_nan(self._step_merged_goal_relevance),
+                "created_goal_relevance_norm": self._mean_float_or_nan(self._step_created_goal_relevance_norm),
+                "updated_goal_relevance_norm": self._mean_float_or_nan(self._step_updated_goal_relevance_norm),
+                "merged_goal_relevance_norm": self._mean_float_or_nan(self._step_merged_goal_relevance_norm),
+                "created_goal_raw": self._mean_float_or_nan(self._step_created_goal_relevance),
+                "updated_goal_raw": self._mean_float_or_nan(self._step_updated_goal_relevance),
+                "merged_goal_raw": self._mean_float_or_nan(self._step_merged_goal_relevance),
+                "created_goal_norm": self._mean_float_or_nan(self._step_created_goal_relevance_norm),
+                "updated_goal_norm": self._mean_float_or_nan(self._step_updated_goal_relevance_norm),
+                "merged_goal_norm": self._mean_float_or_nan(self._step_merged_goal_relevance_norm),
+                "retrieval_goal_raw_avg": float(global_out.get("retrieval_goal_raw_avg", float("nan"))),
+                "retrieval_goal_norm_avg": float(global_out.get("retrieval_goal_norm_avg", float("nan"))),
+                "retrieval_goal_norm_min": float(global_out.get("retrieval_goal_norm_min", float("nan"))),
+                "retrieval_goal_norm_max": float(global_out.get("retrieval_goal_norm_max", float("nan"))),
+                "retrieval_topk_goal_norm": float(global_out.get("retrieval_topk_goal_norm", float("nan"))),
+                "retrieval_non_topk_goal_norm": float(global_out.get("retrieval_non_topk_goal_norm", float("nan"))),
+                "topk_goal_norm_mean": float(global_out.get("topk_goal_norm_mean", float("nan"))),
+                "retrieval_goal_component_avg": float(global_out.get("retrieval_goal_component_avg", float("nan"))),
+                "retrieval_visual_component_avg": float(global_out.get("retrieval_visual_component_avg", float("nan"))),
+                "retrieval_visit_component_avg": float(global_out.get("retrieval_visit_component_avg", float("nan"))),
+                "topk_goal_component_avg": float(global_out.get("topk_goal_component_avg", float("nan"))),
+                "topk_visual_component_avg": float(global_out.get("topk_visual_component_avg", float("nan"))),
+                "topk_visit_component_avg": float(global_out.get("topk_visit_component_avg", float("nan"))),
+                "non_topk_goal_component_avg": float(global_out.get("non_topk_goal_component_avg", float("nan"))),
+                "non_topk_visual_component_avg": float(global_out.get("non_topk_visual_component_avg", float("nan"))),
+                "non_topk_visit_component_avg": float(global_out.get("non_topk_visit_component_avg", float("nan"))),
+                "topk_goal_largest_component_rate": float(global_out.get("topk_goal_largest_component_rate", float("nan"))),
+                "topk_visual_largest_component_rate": float(global_out.get("topk_visual_largest_component_rate", float("nan"))),
+                "topk_visit_largest_component_rate": float(global_out.get("topk_visit_largest_component_rate", float("nan"))),
                 "global_token_count": float(place_tokens.shape[0]),
                 "local_token_count": float(local_tokens.shape[0]),
                 "topo_token_norm_mean": topo_norm_stats["mean"],
@@ -1497,6 +2079,14 @@ class TopoMemoryGraph:
                 "local_token_norm_mean": local_norm_stats["mean"],
             }
         )
+        stats.update(
+            {
+                "retrieved_landmark_count": float(global_out.get("retrieved_landmark_count", 0.0)),
+                "landmark_token_norm_mean": float(global_out.get("landmark_token_norm_mean", 0.0)),
+                "landmark_gate_avg": float(global_out.get("landmark_gate_avg", 0.0)),
+            }
+        )
+        stats.update(self._landmark_debug_stats(place_token_count=int(place_tokens.shape[0])))
         stats.update(self._last_update_stats)
         return {
             "node_features": self._normalize_feature_matrix(
@@ -1640,10 +2230,13 @@ class TopoMemoryBuilder(nn.Module):
             active_valid_values.append(float(stats.get("active_node_valid_ratio", 0.0)))
             empty_retrieval_values.append(float(stats.get("empty_retrieval_ratio", 0.0)))
 
-        mean_stats = {
-            key: float(sum(values) / max(len(values), 1))
-            for key, values in stats_accumulator.items()
-        }
+        mean_stats = {}
+        for key, values in stats_accumulator.items():
+            finite_values = [value for value in values if math.isfinite(value)]
+            mean_stats[key] = (
+                float(sum(finite_values) / len(finite_values))
+                if finite_values else float("nan")
+            )
         if place_node_counts:
             mean_stats.update(
                 {
@@ -1829,10 +2422,13 @@ class BatchedTopoMemory:
             active_valid_values.append(float(stats.get("active_node_valid_ratio", 0.0)))
             empty_retrieval_values.append(float(stats.get("empty_retrieval_ratio", 0.0)))
 
-        mean_stats = {
-            key: float(sum(values) / max(len(values), 1))
-            for key, values in stats_accumulator.items()
-        }
+        mean_stats = {}
+        for key, values in stats_accumulator.items():
+            finite_values = [value for value in values if math.isfinite(value)]
+            mean_stats[key] = (
+                float(sum(finite_values) / len(finite_values))
+                if finite_values else float("nan")
+            )
         if place_node_counts:
             mean_stats.update(
                 {

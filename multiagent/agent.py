@@ -406,6 +406,7 @@ class NavCMTAgent:
         input_ids = encoding['input_ids'].cuda()
         attention_mask = encoding['attention_mask'].cuda()
         lang_features, linear_cls, cls_hidden = self.lang_model(input_ids, attention_mask)
+        topo_instruction_emb = None
 
         # lang_features --> 768
         # linear_cls --> 49 (used to attend to img features)
@@ -475,10 +476,15 @@ class NavCMTAgent:
         }
 
         if self.args.enable_topo_memory and self.topo_memory_manager is not None:
+            with torch.no_grad():
+                topo_instruction_emb = self.vln_model_without_ddp.compute_topo_instruction_embedding(
+                    lang_features.detach(),
+                    attention_mask,
+                ).detach()
             topo_fallback_features = torch.zeros(batch_size, self.args.demb, device=lang_features.device)
             self.topo_memory_manager.start_batch(
                 base_positions=global_positions,
-                instruction_feat=lang_features[:, 0, :].detach(),
+                instruction_feat=topo_instruction_emb,
                 fallback_features=topo_fallback_features,
             )
 
@@ -533,7 +539,7 @@ class NavCMTAgent:
 
             topo_memory_outputs = None
             if self.args.enable_topo_memory and self.topo_memory_manager is not None:
-                topo_memory_outputs = self.topo_memory_manager.retrieve_batch(lang_features[:, 0, :])
+                topo_memory_outputs = self.topo_memory_manager.retrieve_batch(topo_instruction_emb)
 
             pred_direction, pred_progress, pred_goals, pred_logits, grid_ft, compression_stats = self.vln_model(
                 directions=input['directions'],
@@ -551,6 +557,7 @@ class NavCMTAgent:
                 candidates=input['candidates'],
                 centroids=input['centroids'],
                 lang_cls=input['lang_cls'],
+                lang_mask=attention_mask,
                 topo_memory_outputs=topo_memory_outputs,
                 current_t=t,                      # 【新增】告诉模型现在是第几步
                 time_steps=input['time_steps']    # 【新增】告诉模型过去特征的时间标签
@@ -564,23 +571,52 @@ class NavCMTAgent:
                 'step_updated_place_nodes',
                 'goal_relevance',
                 'goal_relevance_score',
+                'goal_rel_raw_avg',
+                'goal_rel_raw_min',
+                'goal_rel_raw_max',
+                'goal_rel_norm_avg',
+                'goal_rel_norm_min',
+                'goal_rel_norm_max',
                 'created_goal_relevance',
                 'updated_goal_relevance',
                 'merged_goal_relevance',
+                'created_goal_relevance_norm',
+                'updated_goal_relevance_norm',
+                'merged_goal_relevance_norm',
+                'created_goal_raw',
+                'updated_goal_raw',
+                'merged_goal_raw',
+                'created_goal_norm',
+                'updated_goal_norm',
+                'merged_goal_norm',
                 'goal_relevance_of_created_nodes',
                 'goal_relevance_of_updated_nodes',
                 'goal_relevance_of_merged_nodes',
+                'goal_relevance_norm_of_created_nodes',
+                'goal_relevance_norm_of_updated_nodes',
+                'goal_relevance_norm_of_merged_nodes',
                 'create_score',
                 'visual_change',
                 'novelty_score',
                 'best_association_score',
                 'base_create',
                 'goal_boost_create',
+                'goal_boost_fire_rate',
                 'final_create',
                 'spatial_create',
                 'visual_create',
                 'turn_create',
                 'merge_unreliable',
+                'spatial_create_rate',
+                'visual_create_rate',
+                'turn_create_rate',
+                'merge_unreliable_rate',
+                'goal_boost_create_rate',
+                'spatial_create_goal_norm',
+                'visual_create_goal_norm',
+                'turn_create_goal_norm',
+                'merge_unreliable_goal_norm',
+                'goal_boost_goal_norm',
                 'event_debug_create',
                 'create_rate',
                 'update_rate',
@@ -635,18 +671,20 @@ class NavCMTAgent:
                 positive_decay_rate = None
                 if self.args.use_time_decay:
                     positive_decay_rate = F.softplus(self.vln_model_without_ddp.decay_rate.detach())
+                with torch.no_grad():
+                    topo_grid_ft = self.vln_model_without_ddp.compute_topo_visual_feature(grid_ft.detach()).detach()
                 for batch_idx, ob in enumerate(obs):
                     if ended[batch_idx]:
                         continue
                     update_stats = self.topo_memory_manager.update_env_step(
                         env_idx=batch_idx,
-                        observation_feature=grid_ft[batch_idx].detach(),
+                        observation_feature=topo_grid_ft[batch_idx],
                         cell_id=int(ob['cur_grid']),
                         xy=topo_xy[batch_idx, 0].detach(),
                         landmark_info=ob.get('topo_landmarks', []),
                         step_id=t,
                         time_decay_rate=positive_decay_rate,
-                        fallback_feature=grid_ft[batch_idx].detach(),
+                        fallback_feature=topo_grid_ft[batch_idx],
                     )
                     for key, value in update_stats.items():
                         self.logs[key].append(value)

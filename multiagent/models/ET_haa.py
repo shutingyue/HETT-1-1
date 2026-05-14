@@ -5,6 +5,12 @@ from torch import nn
 from torch.nn import functional as F
 
 from .goal_predictor import MapEncoder
+from .memory_tokens import (
+    UnifiedMemoryTokens,
+    GRID_MEMORY_TYPE,
+    TOPO_MEMORY_TYPE,
+    memory_stats,
+)
 from .topo_memory import TopoMemoryBuilder
 
 
@@ -134,6 +140,13 @@ class ET(nn.Module):
         self.grid_proj = nn.Linear(768, 768)
         self.use_topo_memory = args.enable_topo_memory
         self.use_time_decay = bool(getattr(args, "use_time_decay", False))
+        self.use_memory_type_embedding = bool(getattr(args, "use_memory_type_embedding", False))
+        if self.use_memory_type_embedding:
+            self.memory_type_embedding = nn.Embedding(
+                int(getattr(args, "num_memory_types", 4)),
+                self.args.demb,
+            )
+            nn.init.zeros_(self.memory_type_embedding.weight)
         if self.use_topo_memory:
             self.topo_memory_builder = TopoMemoryBuilder(args)
             self.topo_goal_offset = nn.Sequential(
@@ -152,6 +165,29 @@ class ET(nn.Module):
         self.print_counter = 0
         self.topo_debug_cache = None
         self.topo_eval_debug_batches = 0
+
+    def _compute_instruction_embedding(self, lang_features, lang_mask=None):
+        """Build a stable instruction-level embedding from token features."""
+
+        if lang_mask is None:
+            return lang_features.mean(dim=1)
+        valid_mask = lang_mask.to(device=lang_features.device).bool()
+        while valid_mask.dim() < lang_features.dim():
+            valid_mask = valid_mask.unsqueeze(-1)
+        valid_mask = valid_mask.to(dtype=lang_features.dtype)
+        token_sum = (lang_features * valid_mask).sum(dim=1)
+        token_count = valid_mask.sum(dim=1).clamp_min(1.0)
+        return token_sum / token_count
+
+    def compute_topo_instruction_embedding(self, lang_features, lang_mask=None):
+        """Project pooled instruction features into the topo visual/text space."""
+
+        return self.text_proj(self._compute_instruction_embedding(lang_features, lang_mask))
+
+    def compute_topo_visual_feature(self, visual_feature):
+        """Project topo observation features into the same space as instructions."""
+
+        return self.grid_proj(visual_feature.to(torch.float32))
 
     def _compute_history_scores(self, tmp_fts, text_ft, time_steps, current_t):
         if tmp_fts.shape[0] > 0:
@@ -309,6 +345,139 @@ class ET(nn.Module):
         }
         return compressed_features, compressed_positions, cell_to_token, stats
 
+    def _apply_memory_type_embedding(self, memory):
+        """Optionally add learned type embeddings to memory.tokens [B, N, D]."""
+
+        if not self.use_memory_type_embedding:
+            return memory
+        type_emb = self.memory_type_embedding(memory.type_ids.to(memory.tokens.device))
+        tokens = memory.tokens + type_emb
+        return UnifiedMemoryTokens(
+            tokens=tokens,
+            padding_mask=memory.padding_mask,
+            positions=memory.positions,
+            type_ids=memory.type_ids,
+            cell_to_token_map=memory.cell_to_token_map,
+            source=memory.source,
+            stats=memory.stats,
+            raw=memory.raw,
+        )
+
+    def _pack_grid_memory_tokens(
+        self,
+        candidate_token_features,
+        candidate_token_positions,
+        cell_to_token_maps,
+        emb_lang,
+        grid_cell_count,
+    ):
+        """Pack compressed grid candidates into UnifiedMemoryTokens.
+
+        Shapes:
+            candidate_token_features: list of [Ni, D]
+            candidate_token_positions: list of [Ni, 2]
+            cell_to_token_maps: list of [G]
+            emb_lang: [B, T, D]
+            returns memory.tokens: [B, N, D]
+        """
+
+        batch_size = emb_lang.shape[0]
+        max_token_num = max(x.shape[0] for x in candidate_token_features)
+        tokens = torch.zeros(batch_size, max_token_num, self.args.demb, device=emb_lang.device)
+        padding_mask = torch.ones(batch_size, max_token_num, device=emb_lang.device, dtype=torch.bool)
+        positions = torch.zeros(batch_size, max_token_num, 2, device=emb_lang.device)
+        type_ids = torch.full(
+            (batch_size, max_token_num),
+            GRID_MEMORY_TYPE,
+            device=emb_lang.device,
+            dtype=torch.long,
+        )
+        cell_to_token_map = torch.zeros(
+            batch_size,
+            grid_cell_count,
+            device=emb_lang.device,
+            dtype=torch.long,
+        )
+
+        for b in range(batch_size):
+            token_count = candidate_token_features[b].shape[0]
+            padding_mask[b, :token_count] = False
+            positions[b, :token_count] = candidate_token_positions[b].to(emb_lang.device)
+            cell_to_token_map[b] = cell_to_token_maps[b].to(emb_lang.device)
+            pos_embed = self.candidate_encoder(candidate_token_positions[b]) * emb_lang[b:b + 1, :1, :]
+            tokens[b, :token_count] = pos_embed.squeeze(0) + candidate_token_features[b]
+
+        memory = UnifiedMemoryTokens(
+            tokens=tokens,
+            padding_mask=padding_mask,
+            positions=positions,
+            type_ids=type_ids,
+            cell_to_token_map=cell_to_token_map,
+            source="grid",
+            stats={},
+            raw=None,
+        )
+        memory.validate("grid_memory")
+        memory.stats.update(memory_stats(memory))
+        return memory
+
+    def _pack_topo_memory_tokens(
+        self,
+        topo_outputs,
+        emb_lang,
+        batch_size,
+    ):
+        """Pack topo node candidates into UnifiedMemoryTokens.
+
+        Shapes:
+            topo_outputs global tokens: [B, N, D]
+            topo_outputs node positions: [B, N, 2]
+            topo_outputs node padding mask: [B, N]
+            returns memory.tokens: [B, N, D]
+        """
+
+        global_retrieved_tokens = topo_outputs.get(
+            "global_retrieved_tokens_padded",
+            topo_outputs["node_features_padded"],
+        ).to(emb_lang.device)
+        node_positions = topo_outputs["node_positions_padded"].to(emb_lang.device)
+        padding_mask = topo_outputs["node_padding_mask"].to(emb_lang.device).bool()
+        cell_to_token_map = topo_outputs["cell_to_node_map"].to(emb_lang.device).long()
+        token_count_padded = global_retrieved_tokens.shape[1]
+        tokens = torch.zeros(
+            batch_size,
+            token_count_padded,
+            self.args.demb,
+            device=emb_lang.device,
+        )
+        type_ids = torch.full(
+            (batch_size, token_count_padded),
+            TOPO_MEMORY_TYPE,
+            device=emb_lang.device,
+            dtype=torch.long,
+        )
+
+        for b in range(batch_size):
+            token_count = int((~padding_mask[b]).sum().item())
+            if token_count == 0:
+                continue
+            pos_embed = self.candidate_encoder(node_positions[b, :token_count]) * emb_lang[b:b + 1, :1, :]
+            tokens[b, :token_count] = pos_embed.squeeze(0) + global_retrieved_tokens[b, :token_count]
+
+        memory = UnifiedMemoryTokens(
+            tokens=tokens,
+            padding_mask=padding_mask,
+            positions=node_positions,
+            type_ids=type_ids,
+            cell_to_token_map=cell_to_token_map,
+            source="topo",
+            stats={},
+            raw={"topo_outputs": topo_outputs},
+        )
+        memory.validate("topo_memory")
+        memory.stats.update(memory_stats(memory))
+        return memory
+
     def forward(self, **inputs):
         """
         forward the model for multiple time-steps (used for training)
@@ -316,7 +485,16 @@ class ET(nn.Module):
         # embed language
         emb_lang = inputs["lang"]
 
-        map_feat = self.map_encoder(inputs['maps'])
+        maps_input = inputs['maps']
+        topo_landmark_mode = getattr(self.args, "topo_landmark_fusion_mode", "aux")
+        topo_landmarks_enabled = bool(getattr(self.args, "use_landmark_nodes", False)) and topo_landmark_mode != "off"
+        original_landmark_map_norm = 0.0
+        if maps_input.shape[1] > 2:
+            original_landmark_map_norm = float(maps_input[:, 2:].detach().flatten(1).norm(dim=1).mean().item())
+        if self.use_topo_memory and topo_landmarks_enabled and topo_landmark_mode == "replace" and maps_input.shape[1] > 2:
+            maps_input = maps_input.clone()
+            maps_input[:, 2:] = 0.0
+        map_feat = self.map_encoder(maps_input)
         # print(torch.isnan(map_feat).any(), torch.isinf(map_feat).any())
 
         # # embed frames and direiction (650,49) --> 768
@@ -360,9 +538,18 @@ class ET(nn.Module):
         candidate_token_positions = []
         cell_to_token_maps = []
         compression_stats = defaultdict(list)
+        if self.use_topo_memory and topo_landmarks_enabled and topo_landmark_mode in ("replace", "both"):
+            compression_stats["original_landmark_map_norm"].append(original_landmark_map_norm)
+            compression_stats["topo_landmark_fusion_mode_id"].append(
+                {"replace": 2.0, "both": 3.0}.get(topo_landmark_mode, 1.0)
+            )
         base_positions = inputs['candidates'].to(emb_lang.device).to(torch.float32)
         grid_cell_count = self.args.grid_size ** 2
         positive_decay_rate = F.softplus(self.decay_rate) if self.use_time_decay else None
+        need_grid_memory = (
+            not self.use_topo_memory
+            or (topo_memory_outputs is None and not self.args.topo_rebuild_fallback)
+        )
 
         topo_history_features = []
         topo_history_index = []
@@ -396,7 +583,8 @@ class ET(nn.Module):
                 else:
                     topo_history_xy.append(base_positions[b].new_zeros((tmp_fts.shape[0], 2)))
                 topo_fallback_features.append(cell_features[current_grids[b].long()])
-            else:
+
+            if need_grid_memory:
                 compressed_features, compressed_positions, cell_to_token, stats = self._compress_spatial_tokens(
                     cell_features,
                     base_positions[b],
@@ -408,42 +596,26 @@ class ET(nn.Module):
                 for key, value in stats.items():
                     compression_stats[key].append(value)
 
+        memory = None
         topo_outputs = None
         if self.use_topo_memory and topo_memory_outputs is not None:
             topo_outputs = topo_memory_outputs
-            # Global retrieved place tokens remain the spatial candidates for the coarse
-            # target head in the current minimal path.
-            # TODO: route global tokens to coarse stage explicitly if the model is split.
             global_retrieved_tokens = topo_outputs.get(
                 "global_retrieved_tokens_padded",
                 topo_outputs["node_features_padded"],
             )
             local_subgraph_tokens = topo_outputs.get("local_subgraph_tokens_padded", None)
-            emb_candidates = torch.zeros(
-                batch_size,
-                global_retrieved_tokens.shape[1],
-                self.args.demb,
-                device=emb_lang.device,
+            memory = self._pack_topo_memory_tokens(
+                topo_outputs=topo_outputs,
+                emb_lang=emb_lang,
+                batch_size=batch_size,
             )
-            spatial_padding_mask = topo_outputs["node_padding_mask"]
-            cell_to_token_map = topo_outputs["cell_to_node_map"]
-            for b in range(batch_size):
-                token_count = int((~spatial_padding_mask[b]).sum().item())
-                if token_count == 0:
-                    continue
-                pos_embed = (
-                    self.candidate_encoder(topo_outputs["node_positions_padded"][b, :token_count])
-                    * emb_lang[b:b + 1, :1, :]
-                )
-                emb_candidates[b, :token_count] = (
-                    pos_embed.squeeze(0) + global_retrieved_tokens[b, :token_count]
-                )
             for key, value in topo_outputs["stats"].items():
                 compression_stats[key].append(value)
             self._append_topo_token_debug_stats(
                 compression_stats,
                 global_retrieved_tokens,
-                spatial_padding_mask,
+                topo_outputs["node_padding_mask"],
                 local_subgraph_tokens,
                 topo_outputs.get("local_token_padding_mask", None),
             )
@@ -493,9 +665,7 @@ class ET(nn.Module):
                 topo_history_xy_tensor,
                 topo_landmarks,
                 base_positions,
-                # Compatibility-first fallback: use the first language token as a pooled goal embedding.
-                # Future work can replace this with a better lang_cls / instruction pooling path.
-                emb_lang[:, 0, :],
+                self.compute_topo_instruction_embedding(emb_lang, inputs.get("lang_mask", None)),
                 current_grids,
                 topo_fallback_tensor,
                 positive_decay_rate,
@@ -508,52 +678,37 @@ class ET(nn.Module):
                 topo_outputs["node_features_padded"],
             )
             local_subgraph_tokens = topo_outputs.get("local_subgraph_tokens_padded", None)
-            emb_candidates = torch.zeros(
-                batch_size,
-                global_retrieved_tokens.shape[1],
-                self.args.demb,
-                device=emb_lang.device,
+            memory = self._pack_topo_memory_tokens(
+                topo_outputs=topo_outputs,
+                emb_lang=emb_lang,
+                batch_size=batch_size,
             )
-            spatial_padding_mask = topo_outputs["node_padding_mask"]
-            cell_to_token_map = topo_outputs["cell_to_node_map"]
-            for b in range(batch_size):
-                token_count = int((~spatial_padding_mask[b]).sum().item())
-                if token_count == 0:
-                    continue
-                pos_embed = (
-                    self.candidate_encoder(topo_outputs["node_positions_padded"][b, :token_count])
-                    * emb_lang[b:b + 1, :1, :]
-                )
-                emb_candidates[b, :token_count] = (
-                    pos_embed.squeeze(0) + global_retrieved_tokens[b, :token_count]
-                )
             for key, value in topo_outputs["stats"].items():
                 compression_stats[key].append(value)
             self._append_topo_token_debug_stats(
                 compression_stats,
                 global_retrieved_tokens,
-                spatial_padding_mask,
+                topo_outputs["node_padding_mask"],
                 local_subgraph_tokens,
                 topo_outputs.get("local_token_padding_mask", None),
             )
         else:
-            max_cell_num = max(token.shape[0] for token in candidate_token_features)
-            emb_candidates = torch.zeros(batch_size, max_cell_num, self.args.demb, device=emb_lang.device)
-            # True means this slot is only batch padding and should be ignored by the transformer.
-            # False means this compressed spatial token is real and should participate in attention.
-            spatial_padding_mask = torch.ones(batch_size, max_cell_num, device=emb_lang.device, dtype=torch.bool)
-            # Each original cell points to the compressed token that represents it.
-            # Near cells map 1:1; far cells in the same coarse region share one token index.
-            cell_to_token_map = torch.zeros(batch_size, grid_cell_count, device=emb_lang.device, dtype=torch.long)
+            memory = self._pack_grid_memory_tokens(
+                candidate_token_features=candidate_token_features,
+                candidate_token_positions=candidate_token_positions,
+                cell_to_token_maps=cell_to_token_maps,
+                emb_lang=emb_lang,
+                grid_cell_count=grid_cell_count,
+            )
 
-            for b in range(batch_size):
-                token_count = candidate_token_features[b].shape[0]
-                spatial_padding_mask[b, :token_count] = False
-                cell_to_token_map[b] = cell_to_token_maps[b]
-                pos_embed = self.candidate_encoder(candidate_token_positions[b]) * emb_lang[b:b + 1, :1, :]
-                emb_candidates[b, :token_count] = pos_embed.squeeze(0) + candidate_token_features[b]
-
+        memory = self._apply_memory_type_embedding(memory)
+        emb_candidates = memory.tokens
+        spatial_padding_mask = memory.padding_mask
+        cell_to_token_map = memory.cell_to_token_map
+        memory_positions = memory.positions
         max_cell_num = emb_candidates.shape[1]
+        for key, value in memory.stats.items():
+            compression_stats[key].append(value)
 
         # emb_centroids = (self.centroid_encoder(inputs['centroids']) * emb_lang[:, 0, :]).view(im_feature.shape[0], -1, 768)
         # emb_centroids = self.centroid_encoder(inputs['centroids']).view(im_feature.shape[0], -1, 768)
@@ -603,7 +758,7 @@ class ET(nn.Module):
                 valid_anchor_probs.unsqueeze(-1) * target_decoder_input, dim=1
             )
             anchor_centers = torch.sum(
-                valid_anchor_probs.unsqueeze(-1) * topo_outputs["node_positions_padded"], dim=1
+                valid_anchor_probs.unsqueeze(-1) * memory_positions, dim=1
             )
             offset_xy = self.topo_goal_offset(anchor_features)
             pred_goals = torch.clamp(
@@ -720,17 +875,7 @@ class ET(nn.Module):
         # gather each original cell's logit from the compressed token that represents it.
         # If several far cells were merged into one coarse token, those cells intentionally
         # share that summary token's logit so the existing CE supervision stays compatible.
-        if self.use_topo_memory:
-            token_count = int(target_logits_token.shape[1])
-            map_min = int(cell_to_token_map.min().item()) if cell_to_token_map.numel() > 0 else 0
-            map_max = int(cell_to_token_map.max().item()) if cell_to_token_map.numel() > 0 else -1
-            if map_min < 0 or map_max >= token_count:
-                raise RuntimeError(
-                    "Invalid topo gather index: cell_to_token_map min={}, max={}, token_count={}".format(
-                        map_min, map_max, token_count
-                    )
-                )
-        target_logits = torch.gather(target_logits_token, 1, cell_to_token_map).unsqueeze(-1)
+        target_logits = memory.gather_cell_logits(target_logits_token).unsqueeze(-1)
         # print(encoder_out_candidates.shape)
 
         # print(direction, progress, goal_logits)
@@ -750,9 +895,9 @@ class ET(nn.Module):
             key: float(sum(values) / max(len(values), 1))
             for key, values in compression_stats.items()
         }
+        mean_stats['max_cell_to_token'] = float(cell_to_token_map.max().item()) if cell_to_token_map.numel() > 0 else -1.0
         if self.use_topo_memory and topo_outputs is not None:
             mean_stats['valid_topo_nodes'] = float((~spatial_padding_mask).sum(dim=1).to(torch.float32).mean().item())
-            mean_stats['max_cell_to_token'] = float(cell_to_token_map.max().item()) if cell_to_token_map.numel() > 0 else -1.0
             if not self.training:
                 self.topo_debug_cache = {
                     'pred_goals_min': float(pred_goals.min().item()),

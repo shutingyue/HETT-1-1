@@ -22,6 +22,84 @@ from env import CityNavBatch
 from parser import parse_args
 
 
+EXPERIMENT_CONFIG_GROUPS = [
+    ("Experiment", [
+        "seed",
+        "mode",
+        "world_size",
+        "local_rank",
+        "log_dir",
+    ]),
+    ("Training", [
+        "epochs",
+        "batch_size",
+        "learning_rate",
+        "feedback",
+        "eval_every",
+        "save_every",
+        "log_every",
+        "resume_optimizer",
+    ]),
+    ("Memory", [
+        "grid_size",
+        "enable_topo_memory",
+        "use_topo_memory",
+        "persistent_topo_memory",
+        "use_time_decay",
+        "use_memory_type_embedding",
+        "num_memory_types",
+        "spatial_compression",
+    ]),
+    ("Topo Memory", [
+        "topo_max_nodes",
+        "global_retrieve_k",
+        "local_hops",
+        "topo_knn",
+        "topo_use_graph_encoder",
+        "topo_message_passing_layers",
+        "topo_merge_radius",
+        "topo_create_radius",
+        "topo_update_momentum",
+    ]),
+    ("Topo Retrieval Weights", [
+        "retrieve_goal_weight",
+        "retrieve_visual_weight",
+        "retrieve_visit_weight",
+        "goal_create_norm_threshold",
+    ]),
+    ("Disabled Nodes", [
+        "use_landmark_nodes",
+        "use_event_nodes",
+    ]),
+]
+
+
+def format_experiment_config(args):
+    lines = ["Experiment configuration:"]
+    for group_name, keys in EXPERIMENT_CONFIG_GROUPS:
+        group_lines = [f"{key}: {getattr(args, key)}" for key in keys if hasattr(args, key)]
+        if not group_lines:
+            continue
+        lines.append("")
+        lines.append(f"[{group_name}]")
+        lines.extend(group_lines)
+    return "\n".join(lines)
+
+
+def print_experiment_config(args):
+    config_text = format_experiment_config(args)
+    print(config_text)
+    return config_text
+
+
+def save_args_json(args, log_dir):
+    os.makedirs(log_dir, exist_ok=True)
+    args_path = os.path.join(log_dir, "args.json")
+    with open(args_path, "w") as outf:
+        json.dump(vars(args), outf, indent=4, sort_keys=True, default=str)
+    return args_path
+
+
 def get_tokenizer(args):
     from transformers import AutoTokenizer
     tokenizer = AutoTokenizer.from_pretrained('../tokenizer_files/bert-base-uncase')
@@ -66,11 +144,11 @@ def train(args, train_env, train_full_traj_env, val_envs, val_full_traj_envs, au
     default_gpu = is_default_gpu(args)
 
     if default_gpu:
-        with open(os.path.join(args.log_dir, 'training_args.json'), 'w') as outf:
-            json.dump(vars(args), outf, indent=4)
+        config_text = print_experiment_config(args)
+        save_args_json(args, args.log_dir)
         writer = SummaryWriter(log_dir=args.log_dir)
         record_file = os.path.join(args.log_dir, 'train.txt')
-        write_to_record_file(str(args) + '\n\n', record_file)
+        write_to_record_file(config_text + '\n', record_file, verbose=False)
 
     agent_class = NavCMTAgent
     agent = agent_class(args, rank=rank)
@@ -251,10 +329,11 @@ def valid(args, val_envs, val_full_traj_envs, rank=-1):
     if args.checkpoint is not None:
         print("Loaded the listener model at iter %d from %s" % (agent.load(args.checkpoint), args.checkpoint))
 
+    save_args_json(args, args.log_dir)
     with open(os.path.join(args.log_dir, 'validation_args.json'), 'w') as outf:
-        json.dump(vars(args), outf, indent=4)
+        json.dump(vars(args), outf, indent=4, default=str)
     record_file = os.path.join(args.log_dir, 'valid.txt')
-    write_to_record_file(str(args) + '\n\n', record_file)
+    write_to_record_file(format_experiment_config(args) + '\n', record_file, verbose=False)
     loss_str = "iter {}".format(iter)
 
     for env_name, env in val_envs.items():

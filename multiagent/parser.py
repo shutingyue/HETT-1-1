@@ -111,6 +111,8 @@ def parse_args():
     add_bool_flag('topo_seed_first_observation', default=False)
     add_bool_flag('topo_rebuild_fallback', default=True)
     parser.add_argument('--topo_max_nodes', type=int, default=16)
+    add_bool_flag('use_memory_type_embedding', default=False)
+    parser.add_argument('--num_memory_types', type=int, default=4)
     parser.add_argument('--max_place_nodes', type=int, default=16)
     parser.add_argument('--max_landmark_nodes', type=int, default=16)
     parser.add_argument('--max_event_nodes', type=int, default=16)
@@ -132,6 +134,8 @@ def parse_args():
     parser.add_argument('--create_goal_weight', type=float, default=0.40)
     parser.add_argument('--create_visual_weight', type=float, default=0.20)
     parser.add_argument('--goal_create_high_threshold', type=float, default=0.25)
+    parser.add_argument('--goal_create_norm_threshold', type=float, default=0.55)
+    parser.add_argument('--goal_relevance_temperature', type=float, default=0.10)
     parser.add_argument('--goal_visual_change_low_threshold', type=float, default=0.18)
     parser.add_argument('--retrieve_goal_weight', type=float, default=0.50)
     parser.add_argument('--retrieve_visual_weight', type=float, default=0.30)
@@ -141,6 +145,26 @@ def parse_args():
     parser.add_argument('--patch_bank_size', type=int, default=3)
     add_bool_flag('use_event_nodes', default=False)
     add_bool_flag('use_landmark_nodes', default=False)
+    add_bool_flag('landmark_as_auxiliary', default=True)
+    add_bool_flag('landmark_can_be_goal', default=False)
+    add_bool_flag('landmark_can_be_active', default=False)
+    add_bool_flag('landmark_use_visual_support', default=True)
+    parser.add_argument('--landmark_retrieve_k', type=int, default=2)
+    parser.add_argument('--max_landmark_degree', type=int, default=3)
+    parser.add_argument('--landmark_conf_threshold', type=float, default=0.35)
+    parser.add_argument('--landmark_attach_radius', type=float, default=0.20)
+    parser.add_argument(
+        '--topo_landmark_fusion_mode',
+        type=str,
+        choices=['off', 'aux', 'replace', 'both'],
+        default='aux',
+    )
+    parser.add_argument(
+        '--landmark_gate_mode',
+        type=str,
+        choices=['confidence', 'learnable', 'constant'],
+        default='confidence',
+    )
     parser.add_argument('--topo_knn', type=int, default=2)
     parser.add_argument('--topo_spatial_edge_radius', type=float, default=0.20)
     parser.add_argument('--topo_semantic_edge_threshold', type=float, default=0.90)
@@ -259,8 +283,19 @@ def postprocess_args(args):
     args.turn_event_threshold_deg = float(args.turn_event_threshold_deg or args.topo_turn_threshold_deg)
     args.topo_turn_threshold_deg = args.turn_event_threshold_deg
     args.global_retrieve_k = max(int(args.global_retrieve_k), 1)
+    args.landmark_retrieve_k = max(int(args.landmark_retrieve_k), 0)
+    args.max_landmark_degree = max(int(args.max_landmark_degree), 1)
+    args.landmark_conf_threshold = max(0.0, min(float(args.landmark_conf_threshold), 1.0))
+    args.landmark_attach_radius = max(float(args.landmark_attach_radius), 1e-6)
     args.patch_bank_size = max(int(args.patch_bank_size), 1)
     args.local_hops = max(int(args.local_hops), 1)
+    if args.topo_landmark_fusion_mode == 'off':
+        args.use_landmark_nodes = False
+    if args.use_landmark_nodes:
+        args.landmark_as_auxiliary = bool(args.landmark_as_auxiliary)
+        if args.landmark_as_auxiliary:
+            args.landmark_can_be_goal = False
+            args.landmark_can_be_active = False
 
 
     return args
