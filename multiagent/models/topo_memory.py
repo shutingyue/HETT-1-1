@@ -967,6 +967,7 @@ class TopoMemoryGraph:
             "step_landmark_attachments": float(self._step_landmark_attachments),
             "step_updated_place_nodes": float(self._step_updated_nodes),
             "total_place_nodes": float(len(self.place_nodes)),
+            "num_place_nodes_stored": float(len(self.place_nodes)),
             "total_landmark_nodes": float(len(self.landmark_nodes)),
             "total_event_nodes": float(len(self.event_nodes)),
             "total_temporal_edges": float(len(self.temporal_edges)),
@@ -976,6 +977,7 @@ class TopoMemoryGraph:
             "create_place_nodes_count": float(self._step_new_nodes),
             "merge_place_nodes_count": float(self._step_merged_nodes),
             "update_existing_place_nodes_count": float(self._step_updated_nodes),
+            "num_place_nodes_created": float(self._step_new_nodes),
             "goal_relevance": float(goal_relevance.item()),
             "goal_relevance_score": float(goal_relevance_score.item()),
             "created_goal_relevance": self._mean_float_or_nan(self._step_created_goal_relevance),
@@ -1344,6 +1346,10 @@ class TopoMemoryGraph:
                     "active_place_id": -1.0,
                     "global_retrieved_nodes": 0.0,
                     "local_retrieved_nodes": 0.0,
+                    "num_retrieved_global_nodes": 0.0,
+                    "num_retrieved_local_nodes": 0.0,
+                    "num_place_nodes_created": 0.0,
+                    "num_place_nodes_stored": 0.0,
                     "active_node_valid_ratio": 0.0,
                     "empty_retrieval_ratio": 1.0,
                     "node_saturation_ratio": 0.0,
@@ -1447,6 +1453,7 @@ class TopoMemoryGraph:
 
         stats = {
             "place_node_count": float(len(self.place_nodes)),
+            "num_place_nodes_stored": float(len(self.place_nodes)),
             "avg_place_nodes": float(len(self.place_nodes)),
             "max_place_nodes_used": float(len(self.place_nodes)),
             "min_place_nodes_used": float(len(self.place_nodes)),
@@ -1455,6 +1462,7 @@ class TopoMemoryGraph:
             "updated_nodes": float(self._step_updated_nodes),
             "merged_nodes": float(self._step_merged_nodes),
             "create_place_nodes_count": float(self._step_new_nodes),
+            "num_place_nodes_created": float(self._step_new_nodes),
             "merge_place_nodes_count": float(self._step_merged_nodes),
             "update_existing_place_nodes_count": float(self._step_updated_nodes),
             "landmark_nodes": float(len(self.landmark_nodes)),
@@ -1480,6 +1488,8 @@ class TopoMemoryGraph:
             {
                 "global_retrieved_nodes": float(place_tokens.shape[0]),
                 "local_retrieved_nodes": float(local_out.get("local_place_count", 0.0)),
+                "num_retrieved_global_nodes": float(place_tokens.shape[0]),
+                "num_retrieved_local_nodes": float(local_out.get("local_place_count", 0.0)),
                 "active_node_valid_ratio": float(local_out.get("active_node_valid", 0.0)),
                 "empty_retrieval_ratio": 0.0 if place_tokens.shape[0] > 0 else 1.0,
                 "node_saturation_ratio": float(len(self.place_nodes)) / max(float(self.args.max_place_nodes), 1.0),
@@ -1775,6 +1785,7 @@ class BatchedTopoMemory:
         node_positions_padded = template_tensor.new_zeros(batch_size, max_nodes, 2)
         node_patch_padded = template_tensor.new_zeros(batch_size, max_nodes, hidden_size)
         node_padding_mask = torch.ones(batch_size, max_nodes, device=template_tensor.device, dtype=torch.bool)
+        node_valid_place_mask = torch.zeros(batch_size, max_nodes, device=template_tensor.device, dtype=torch.bool)
         local_subgraph_tokens_padded = template_tensor.new_zeros(batch_size, max_local_tokens, hidden_size)
         local_token_padding_mask = torch.ones(batch_size, max_local_tokens, device=template_tensor.device, dtype=torch.bool)
         cell_to_node_map = torch.zeros(batch_size, self.graphs[0].base_positions.shape[0], device=template_tensor.device, dtype=torch.long)
@@ -1823,7 +1834,10 @@ class BatchedTopoMemory:
             for key, value in output["stats"].items():
                 stats_accumulator.setdefault(key, []).append(float(value))
             stats = output["stats"]
-            place_node_counts.append(float(stats.get("place_node_count", stats.get("nodes_after_merge", 0.0))))
+            place_node_count = float(stats.get("place_node_count", stats.get("nodes_after_merge", 0.0)))
+            if place_node_count > 0.0:
+                node_valid_place_mask[env_idx, :count] = True
+            place_node_counts.append(place_node_count)
             global_retrieved_counts.append(float(stats.get("global_retrieved_nodes", 0.0)))
             local_retrieved_counts.append(float(stats.get("local_retrieved_nodes", 0.0)))
             active_valid_values.append(float(stats.get("active_node_valid_ratio", 0.0)))
@@ -1851,6 +1865,7 @@ class BatchedTopoMemory:
             "node_positions_padded": node_positions_padded,
             "node_patch_padded": node_patch_padded,
             "node_padding_mask": node_padding_mask,
+            "node_valid_place_mask": node_valid_place_mask,
             "local_subgraph_tokens_padded": local_subgraph_tokens_padded,
             "local_token_padding_mask": local_token_padding_mask,
             "cell_to_node_map": cell_to_node_map,

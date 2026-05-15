@@ -64,17 +64,20 @@ def load_init_param(opts):
 
 
 def init_distributed(opts):
+    opts.local_rank = int(os.environ.get("LOCAL_RANK", getattr(opts, "local_rank", 0)))
+    opts.rank = int(os.environ.get("RANK", 0))
+    opts.world_size = int(os.environ.get("WORLD_SIZE", getattr(opts, "world_size", 1)))
     init_param = load_init_param(opts)
     rank = init_param["rank"]
 
-    print(f"Init distributed {init_param['rank']} - {init_param['world_size']}")
-
     dist.init_process_group(**init_param)
+    if is_main_process():
+        print(f"Init distributed rank={get_rank()} world_size={get_world_size()} local_rank={opts.local_rank}")
     return rank
 
 
 def is_default_gpu(opts) -> bool:
-    return opts.local_rank == -1 or dist.get_rank() == 0
+    return is_main_process()
 
 
 def is_dist_avail_and_initialized():
@@ -88,6 +91,28 @@ def get_world_size():
     if not is_dist_avail_and_initialized():
         return 1
     return dist.get_world_size()
+
+
+def get_rank():
+    if not is_dist_avail_and_initialized():
+        return 0
+    return dist.get_rank()
+
+
+def is_main_process():
+    return get_rank() == 0
+
+
+def barrier():
+    if is_dist_avail_and_initialized():
+        dist.barrier()
+
+
+def cleanup_distributed(synchronize=True):
+    if is_dist_avail_and_initialized():
+        if synchronize:
+            dist.barrier()
+        dist.destroy_process_group()
 
 def all_gather(data):
     """

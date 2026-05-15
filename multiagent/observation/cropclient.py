@@ -68,7 +68,13 @@ def _compute_view_area_corners_rowcol(map_name: str, pose: Pose4D):
     return np.array(view_area_corners_rowcol, dtype=np.float32)
 
 
-def load_image_cache(image_dir=ORTHO_IMAGE_DIR, alt_env: Literal['', 'flood', 'ground_fissure'] = ''):
+def load_image_cache(
+    image_dir=ORTHO_IMAGE_DIR,
+    alt_env: Literal['', 'flood', 'ground_fissure'] = '',
+    use_progress_bar: bool = False,
+    log_plain_progress: bool = False,
+    progress_log_interval: int = 10,
+):
     if alt_env:
         image_dir = image_dir / alt_env
 
@@ -81,10 +87,17 @@ def load_image_cache(image_dir=ORTHO_IMAGE_DIR, alt_env: Literal['', 'flood', 'g
         }
 
     if _rgb_cache is None:
-        _rgb_cache = {
-            rgb_path.stem: cv2.cvtColor(cv2.imread(str(rgb_path)), cv2.COLOR_BGR2RGB)
-            for rgb_path in tqdm(image_dir.glob("*.png"), desc="reading rgb data from disk", leave=False)
-        }
+        rgb_paths = list(image_dir.glob("*.png"))
+        progress_log_interval = max(int(progress_log_interval or 1), 1)
+        _rgb_cache = {}
+        total = len(rgb_paths)
+        for idx, rgb_path in enumerate(
+            tqdm(rgb_paths, desc="reading rgb data from disk", leave=False, disable=not use_progress_bar),
+            start=1,
+        ):
+            _rgb_cache[rgb_path.stem] = cv2.cvtColor(cv2.imread(str(rgb_path)), cv2.COLOR_BGR2RGB)
+            if log_plain_progress and (idx % progress_log_interval == 0 or idx == total):
+                print(f"[Data] reading rgb data {min(idx, total)}/{total}")
 
     # if _height_cache is None:
     #     _height_cache = {

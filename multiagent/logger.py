@@ -1,8 +1,7 @@
 import math
 import sys
 import time
-
-from PIL import Image
+from collections import OrderedDict
 
 
 # from gsamllavanav.parser import ExperimentArgs
@@ -61,7 +60,7 @@ class Timer:
                   (key, self.cul[key], self.cul[key]*1./self.iter, self.cul[key]*1./total))
         print(total / self.iter)
 
-def print_progress(iteration, total, prefix='', suffix='', decimals=1, bar_length=100):
+def print_progress(iteration, total, prefix='', suffix='', decimals=1, bar_length=100, use_progress_bar=False):
     """
     Call in a loop to create terminal progress bar
     @params:
@@ -72,6 +71,8 @@ def print_progress(iteration, total, prefix='', suffix='', decimals=1, bar_lengt
         decimals    - Optional  : positive number of decimals in percent complete (Int)
         bar_length  - Optional  : character length of bar (Int)
     """
+    if not use_progress_bar:
+        return
     str_format = "{0:." + str(decimals) + "f}"
     percents = str_format.format(100 * (iteration / float(total)))
     filled_length = int(round(bar_length * iteration / float(total)))
@@ -82,6 +83,15 @@ def print_progress(iteration, total, prefix='', suffix='', decimals=1, bar_lengt
     if iteration == total:
         sys.stdout.write('\n')
     sys.stdout.flush()
+
+
+def log_progress(prefix, current, total, extra="", interval=10):
+    interval = max(int(interval or 1), 1)
+    current = int(current)
+    total = int(total)
+    if current % interval == 0 or current >= total:
+        extra = f" {extra}" if extra else ""
+        print(f"[{prefix}] step={current}/{total}{extra}")
 
 
 # def init(args: ExperimentArgs):

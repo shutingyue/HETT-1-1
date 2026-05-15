@@ -17,6 +17,7 @@ from multiagent.mapdata import MAP_BOUNDS
 from multiagent.maps.landmark_nav_map import LandmarkNavMap
 from multiagent.observation import cropclient
 from multiagent.space import Pose4D, modulo_radians, Point2D
+from multiagent.utils.distributed import is_main_process
 from typing import List, Dict, Callable, Tuple
 
 
@@ -123,12 +124,18 @@ class CityNavBatch(torch.utils.data.IterableDataset):
         #     with jsonlines.open(anno_file, 'r') as f:
         #         for item in f:
         #             self.data.append(item)
-        cropclient.load_image_cache()
+        cropclient.load_image_cache(
+            use_progress_bar=(args.use_progress_bar and is_main_process()),
+            log_plain_progress=(not args.use_progress_bar and is_main_process()),
+            progress_log_interval=args.progress_log_interval,
+        )
         objects = get_city_refer_objects()
         full_data = generate_episodes_from_mturk_trajectories(
             objects,
             load_mturk_trajectories(split, 'all', args.altitude),
-            disable_tqdm=(rank != 0),
+            disable_tqdm=not (args.use_progress_bar and is_main_process()),
+            log_plain_progress=(not args.use_progress_bar and is_main_process()),
+            progress_log_interval=args.progress_log_interval,
         )
 
         random.seed(seed)

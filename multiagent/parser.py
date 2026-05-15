@@ -95,6 +95,7 @@ def parse_args():
     parser.add_argument('--mode', type=str, choices=['train', 'eval', 'visualize'], default='train')
     parser.add_argument('--local_rank', type=int, default=-1)
     parser.add_argument('--world_size', type=int, default=1, help='number of gpus')
+    add_bool_flag('debug_ddp', default=False)
 
     # parser.add_argument('--model', type=str, choices=['mgp', 'seq2seq_with_map', 'cma_with_map'], default='mgp')
     parser.add_argument('--ignore_id', type=int, default=-100, help='ignoreid for action')
@@ -104,14 +105,29 @@ def parse_args():
     add_bool_flag('spatial_compression', default=False)
     parser.add_argument('--spatial_dist_threshold', type=int, default=1)
     parser.add_argument('--spatial_far_coarse_size', type=int, default=2)
-    parser.add_argument('--use_topo_memory', action='store_true', default=False)
+    add_bool_flag('use_umti', default=False)
+    add_bool_flag('debug_memory_tokens', default=False)
+    parser.add_argument(
+        '--use_topo_memory',
+        action='store_true',
+        default=False,
+        help='Deprecated alias kept for old command lines; use --enable_topo_memory to turn topo memory on.',
+    )
     add_bool_flag('use_time_decay', default=False)
     add_bool_flag('enable_topo_memory', default=False)
     add_bool_flag('persistent_topo_memory', default=False)
     add_bool_flag('topo_seed_first_observation', default=False)
-    add_bool_flag('topo_rebuild_fallback', default=True)
+    add_bool_flag('topo_rebuild_fallback', default=False)
     parser.add_argument('--topo_max_nodes', type=int, default=16)
-    parser.add_argument('--max_place_nodes', type=int, default=16)
+    add_bool_flag('use_memory_type_embedding', default=False)
+    parser.add_argument('--num_memory_types', type=int, default=4)
+    add_bool_flag('use_topo_gate', default=True)
+    add_bool_flag('use_semantic_nodes', default=False)
+    add_bool_flag('use_elam', default=False)
+    add_bool_flag('use_uncertainty_policy', default=False)
+    parser.add_argument('--max_semantic_nodes', type=int, default=16)
+    parser.add_argument('--semantic_node_type_id', type=int, default=2)
+    parser.add_argument('--max_place_nodes', type=int, default=None)
     parser.add_argument('--max_landmark_nodes', type=int, default=16)
     parser.add_argument('--max_event_nodes', type=int, default=16)
     parser.add_argument('--topo_merge_radius', type=float, default=0.12)
@@ -132,6 +148,7 @@ def parse_args():
     parser.add_argument('--create_goal_weight', type=float, default=0.40)
     parser.add_argument('--create_visual_weight', type=float, default=0.20)
     parser.add_argument('--goal_create_high_threshold', type=float, default=0.25)
+    parser.add_argument('--goal_create_norm_threshold', type=float, default=0.55)
     parser.add_argument('--goal_visual_change_low_threshold', type=float, default=0.18)
     parser.add_argument('--retrieve_goal_weight', type=float, default=0.50)
     parser.add_argument('--retrieve_visual_weight', type=float, default=0.30)
@@ -150,10 +167,10 @@ def parse_args():
         parser.add_argument(
             '--topo_use_graph_encoder',
             action=bool_optional_action,
-            default=True
+            default=False
         )
     else:
-        parser.add_argument('--topo_use_graph_encoder', type=int, choices=[0, 1], default=1)
+        parser.add_argument('--topo_use_graph_encoder', type=int, choices=[0, 1], default=0)
     parser.add_argument('--topo_message_passing_layers', type=int, default=1)
     parser.add_argument('--topo_update_momentum', type=float, default=0.7)
     parser.add_argument('--topo_offset_scale', type=float, default=0.08)
@@ -161,10 +178,10 @@ def parse_args():
         parser.add_argument(
             '--topo_aux_grid_supervision',
             action=bool_optional_action,
-            default=True
+            default=False
         )
     else:
-        parser.add_argument('--topo_aux_grid_supervision', type=int, choices=[0, 1], default=1)
+        parser.add_argument('--topo_aux_grid_supervision', type=int, choices=[0, 1], default=0)
     parser.add_argument('--demb', type=int, default=768)
     parser.add_argument('--encoder_heads', type=int, default=12)
     parser.add_argument('--encoder_layers', type=int, default=2)
@@ -186,6 +203,8 @@ def parse_args():
     # logger
     parser.add_argument('--log_every', type=int, default=5)
     parser.add_argument('--log_dir', type=str, default='log')
+    add_bool_flag('use_progress_bar', default=False)
+    parser.add_argument('--progress_log_interval', type=int, default=10)
 
     # observation
     parser.add_argument('--map_size', type=int, default=240)
@@ -250,9 +269,13 @@ def postprocess_args(args):
 
     args.map_shape = (args.map_size, args.map_size)
     args.map_pixels_per_meter = args.map_size / args.map_meters
-    args.enable_topo_memory = bool(args.enable_topo_memory or args.use_topo_memory)
+    args.legacy_use_topo_memory_requested = bool(args.use_topo_memory)
+    args.enable_topo_memory = bool(args.enable_topo_memory)
     args.use_topo_memory = args.enable_topo_memory
-    args.max_place_nodes = int(args.max_place_nodes or args.topo_max_nodes)
+    args.use_umti = bool(args.use_umti)
+    args.num_memory_types = max(int(args.num_memory_types), 4)
+    args.semantic_node_type_id = int(args.semantic_node_type_id)
+    args.max_place_nodes = int(args.max_place_nodes if args.max_place_nodes is not None else args.topo_max_nodes)
     args.topo_max_nodes = args.max_place_nodes
     args.place_merge_radius = float(args.place_merge_radius or args.topo_merge_radius)
     args.topo_merge_radius = args.place_merge_radius

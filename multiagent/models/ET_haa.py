@@ -6,6 +6,7 @@ from torch.nn import functional as F
 
 from .goal_predictor import MapEncoder
 from .topo_memory import TopoMemoryBuilder
+from .umti import UMTIMemoryAdapter
 
 
 class SoftDotAttention(nn.Module):
@@ -132,8 +133,13 @@ class ET(nn.Module):
 
         self.text_proj = nn.Linear(768, 768)
         self.grid_proj = nn.Linear(768, 768)
-        self.use_topo_memory = args.enable_topo_memory
+        self.use_umti = bool(getattr(args, "use_umti", False))
+        # Stage 1 routes topo place nodes only through UMTI. Keeping the legacy
+        # topo branch dormant preserves the original HETT path whenever UMTI is off.
+        self.use_topo_memory = False
         self.use_time_decay = bool(getattr(args, "use_time_decay", False))
+        if self.use_umti:
+            self.umti_adapter = UMTIMemoryAdapter(args, args.demb)
         if self.use_topo_memory:
             self.topo_memory_builder = TopoMemoryBuilder(args)
             self.topo_goal_offset = nn.Sequential(
@@ -409,7 +415,48 @@ class ET(nn.Module):
                     compression_stats[key].append(value)
 
         topo_outputs = None
-        if self.use_topo_memory and topo_memory_outputs is not None:
+        if self.use_umti:
+            max_cell_num = max(token.shape[0] for token in candidate_token_features)
+            grid_tokens = torch.zeros(batch_size, max_cell_num, self.args.demb, device=emb_lang.device)
+            grid_positions = torch.zeros(batch_size, max_cell_num, 2, device=emb_lang.device, dtype=torch.float32)
+            grid_mask = torch.zeros(batch_size, max_cell_num, device=emb_lang.device, dtype=torch.bool)
+            cell_to_token_map = torch.zeros(batch_size, grid_cell_count, device=emb_lang.device, dtype=torch.long)
+
+            for b in range(batch_size):
+                token_count = candidate_token_features[b].shape[0]
+                grid_tokens[b, :token_count] = candidate_token_features[b]
+                grid_positions[b, :token_count] = candidate_token_positions[b].to(torch.float32)
+                grid_mask[b, :token_count] = True
+                cell_to_token_map[b] = cell_to_token_maps[b]
+
+            umti_batch = {
+                "batch_size": batch_size,
+                "hidden_size": self.args.demb,
+                "device": emb_lang.device,
+                "dtype": grid_tokens.dtype,
+                "grid_positions": grid_positions,
+                "grid_mask": grid_mask,
+                "topo_max_nodes": int(self.args.topo_max_nodes),
+                "global_retrieve_k": int(getattr(self.args, "global_retrieve_k", self.args.topo_max_nodes)),
+                "semantic_node_type_id": int(getattr(self.args, "semantic_node_type_id", 2)),
+                "debug_context": inputs.get("umti_debug_context", {}),
+            }
+            if topo_memory_outputs is not None:
+                for key, value in topo_memory_outputs.get("stats", {}).items():
+                    if isinstance(value, (int, float)):
+                        compression_stats[key].append(float(value))
+            memory_pack = self.umti_adapter(
+                grid_tokens,
+                topo_memory_state=topo_memory_outputs,
+                batch=umti_batch,
+            )
+            emb_candidates = memory_pack["tokens"]
+            spatial_padding_mask = ~memory_pack["mask"].bool()
+            for key, value in memory_pack.get("stats", {}).items():
+                if isinstance(value, (int, float)):
+                    compression_stats[key].append(float(value))
+                    compression_stats[f"umti_{key}"].append(float(value))
+        elif self.use_topo_memory and topo_memory_outputs is not None:
             topo_outputs = topo_memory_outputs
             # Global retrieved place tokens remain the spatial candidates for the coarse
             # target head in the current minimal path.

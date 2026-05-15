@@ -16,9 +16,18 @@ def generate_episodes_from_mturk_trajectories(
     teacher_type: TeacherType = 'lookahead',
     teacher_params: TeacherParams = LookaheadTeacherParams(lookahead=1),
     disable_tqdm: bool = False,
+    log_plain_progress: bool = False,
+    progress_log_interval: int = 10,
 ) -> List[Episode]:
     episodes = []
-    for mturk_traj in tqdm(mturk_trajectories, desc='generating episodes', disable=disable_tqdm):
+    total = len(mturk_trajectories)
+    progress_log_interval = max(int(progress_log_interval or 1), 1)
+    for idx, mturk_traj in enumerate(
+        tqdm(mturk_trajectories, desc='generating episodes', disable=disable_tqdm),
+        start=1,
+    ):
+        if log_plain_progress and (idx % progress_log_interval == 0 or idx == total):
+            print(f"[Data] generating episodes {idx}/{total}")
 
         if mturk_traj.dist_marker_to_target > max_dist_marker_to_target:
             continue

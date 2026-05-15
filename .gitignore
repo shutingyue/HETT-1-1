@@ -222,3 +222,28 @@ datasets/
 *.tif
 *.tiff
 *.npz
+# Python cache
+__pycache__/
+*.pyc
+*.pyo
+
+# logs
+log/
+*.log
+
+# checkpoints and training outputs
+datasets/checkpoint/latest
+datasets/checkpoint/best_val_unseen
+datasets/checkpoint/best_val_unseen_*
+datasets/checkpoint/*.pth
+datasets/checkpoint/*.pt
+datasets/checkpoint/*.ckpt
+datasets/checkpoint/train.txt
+datasets/checkpoint/valid.txt
+datasets/checkpoint/args.json
+datasets/checkpoint/training_args.json
+datasets/checkpoint/validation_args.json
+
+# runtime outputs
+runs/
+wandb/

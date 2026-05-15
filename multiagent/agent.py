@@ -26,6 +26,7 @@ from multiagent.models.CLIP import CLIP
 # from direction.models.ddppo.resenet_encoders import TorchVisionResNet50
 from multiagent.models.goal_predictor import GoalPredictor, MapEncoder
 from multiagent.models.topo_memory import BatchedTopoMemory
+from multiagent.utils.distributed import is_main_process
 from multiagent.observation import cropclient
 from multiagent.space import Pose4D, Point2D, Point3D
 from multiagent.teacher.algorithm.lookahead import lookahead_discrete_action
@@ -90,7 +91,7 @@ def compute_iou(a, b):
 
 
 def is_default_gpu(opts) -> bool:
-    return opts.local_rank == -1 or dist.get_rank() == 0
+    return is_main_process()
 
 
 def get_direction(start, end):
@@ -238,7 +239,15 @@ class NavCMTAgent:
         self.topo_eval_stage_batches = 0
         self.topo_eval_debug_limit = 5
         self.topo_history_debug_batches = 0
-        self.topo_memory_manager = BatchedTopoMemory(self.args) if self.args.enable_topo_memory else None
+        self.umti_debug_epoch = None
+        self.umti_debug_batch_idx = None
+        self.umti_debug_phase = None
+        self.umti_debug_enabled = False
+        self.topo_memory_manager = (
+            BatchedTopoMemory(self.args)
+            if self.args.enable_topo_memory and getattr(self.args, "use_umti", False)
+            else None
+        )
 
     def get_results(self):
 
@@ -259,7 +268,7 @@ class NavCMTAgent:
         self.topo_eval_debug_batches = 0
         self.topo_eval_stage_batches = 0
         self.topo_history_debug_batches = 0
-        if self.args.use_topo_memory:
+        if self.args.enable_topo_memory and hasattr(self.vln_model_without_ddp, 'topo_memory_builder'):
             self.vln_model_without_ddp.topo_eval_debug_batches = 0
             self.vln_model_without_ddp.topo_memory_builder._eval_debug_batches = 0
         idx = 0
@@ -270,10 +279,19 @@ class NavCMTAgent:
                 self.loss = 0
                 self.results[traj['instr_id']] = traj
                 # print(traj)
-            tot = loader.dataset.size() / self.env.batch_size
-            print_progress(idx, tot,
-                           prefix='Progress:', suffix='%s (%d/%d)' % (
-                    timeSince(start, float(idx) / tot), idx, tot), bar_length=80)
+            tot = int(math.ceil(float(loader.dataset.size()) / float(self.env.batch_size)))
+            if self.default_gpu:
+                if self.args.use_progress_bar:
+                    print_progress(idx, tot,
+                                   prefix='Progress:', suffix='%s (%d/%d)' % (
+                            timeSince(start, float(idx) / tot), idx, tot), bar_length=80,
+                                   use_progress_bar=True)
+                else:
+                    elapsed = int(time.time() - start)
+                    split = getattr(self.env, 'split', env_name)
+                    interval = max(int(self.args.progress_log_interval or 1), 1)
+                    if idx % interval == 0 or idx >= tot:
+                        print(f"[Eval] split={split} step={idx}/{tot} elapsed={elapsed}s")
 
 
     def test(self, loader, env_name='no_name_provided', feedback='student', not_in_train=False, **kwargs):
@@ -291,7 +309,7 @@ class NavCMTAgent:
         self.topo_eval_debug_batches = 0
         self.topo_eval_stage_batches = 0
         self.topo_history_debug_batches = 0
-        if self.args.use_topo_memory:
+        if self.args.enable_topo_memory and hasattr(self.vln_model_without_ddp, 'topo_memory_builder'):
             self.vln_model_without_ddp.topo_eval_debug_batches = 0
             self.vln_model_without_ddp.topo_memory_builder._eval_debug_batches = 0
         idx = 0
@@ -302,12 +320,22 @@ class NavCMTAgent:
                 self.loss = 0
                 self.results[traj['instr_id']] = traj
                 # print(traj)
-            tot = loader.dataset.size() / self.env.batch_size
-            print_progress(idx, tot,
-                           prefix='Progress:', suffix='%s (%d/%d)' % (
-                    timeSince(start, float(idx) / tot), idx, tot), bar_length=80)
+            tot = int(math.ceil(float(loader.dataset.size()) / float(self.env.batch_size)))
+            if self.default_gpu:
+                if self.args.use_progress_bar:
+                    print_progress(idx, tot,
+                                   prefix='Progress:', suffix='%s (%d/%d)' % (
+                            timeSince(start, float(idx) / tot), idx, tot), bar_length=80,
+                                   use_progress_bar=True)
+                else:
+                    elapsed = int(time.time() - start)
+                    split = getattr(self.env, 'split', env_name)
+                    interval = max(int(self.args.progress_log_interval or 1), 1)
+                    if idx % interval == 0 or idx >= tot:
+                        print(f"[Eval] split={split} step={idx}/{tot} elapsed={elapsed}s")
 
-    def train(self, loader, n_epochs, feedback='student', nss_w_weighting=1, max_batches_per_epoch=None, **kwargs):
+    def train(self, loader, n_epochs, feedback='student', nss_w_weighting=1, max_batches_per_epoch=None,
+              epoch_idx=None, **kwargs):
         ''' Train for a given number of epochs '''
         self.feedback = feedback
 
@@ -329,6 +357,7 @@ class NavCMTAgent:
             epoch_progress_total = min(dataset_batches, int(max_batches_per_epoch))
         progress_total = max(int(n_epochs) * epoch_progress_total, 1)
         progress_idx = 0
+        actual_batches = 0
         start = time.time()
         for epoch in range(1, n_epochs + 1):
             idx = 0
@@ -338,6 +367,7 @@ class NavCMTAgent:
                     break
                 idx += 1
                 progress_idx += 1
+                actual_batches += 1
                 # if idx >= 100:
                 #     break
                 # train_loop_start_time = time.time()
@@ -348,16 +378,27 @@ class NavCMTAgent:
 
                 if feedback == 'teacher':
                     self.feedback = 'teacher'
+                    self.umti_debug_epoch = epoch_idx if epoch_idx is not None else epoch
+                    self.umti_debug_batch_idx = idx
+                    self.umti_debug_phase = 'teacher'
+                    self.umti_debug_enabled = True
                     self.rollout(train_ml=self.args.teacher_weight)
                 elif feedback == 'student':  # agents in teacher and student separately
 
                     self.feedback = 'teacher'
+                    self.umti_debug_epoch = epoch_idx if epoch_idx is not None else epoch
+                    self.umti_debug_batch_idx = idx
+                    self.umti_debug_phase = 'teacher'
+                    self.umti_debug_enabled = False
                     self.rollout(train_ml=self.args.ml_weight)  # self.args.nss_w*nss_w_weighting, **kwargs)
                     # if epoch_train > 10000:
                     self.feedback = 'student'
+                    self.umti_debug_phase = 'student'
+                    self.umti_debug_enabled = True
                     self.rollout(train_ml=self.args.ml_weight)
                 else:
                     assert False
+                self.umti_debug_enabled = False
 
                 # print("--- One rollout takes %s seconds ---" % (time.time() - train_loop_start_time))
 
@@ -377,9 +418,30 @@ class NavCMTAgent:
                 if self.default_gpu:
                     tot = progress_total
                     # print('is')
-                    print_progress(progress_idx, tot,
-                                   prefix='Progress:', suffix='%s (%d/%d)' % (
-                            timeSince(start, min(float(progress_idx) / float(tot), 1.0)), progress_idx, tot), bar_length=80)
+                    if self.args.use_progress_bar:
+                        print_progress(
+                            progress_idx,
+                            tot,
+                            prefix='Progress:',
+                            suffix='%s (%d/%d)' % (
+                                timeSince(start, min(float(progress_idx) / float(tot), 1.0)),
+                                progress_idx,
+                                tot,
+                            ),
+                            bar_length=80,
+                            use_progress_bar=True,
+                        )
+                    else:
+                        elapsed = int(time.time() - start)
+                        loss_value = float(self.loss.detach().item()) if torch.is_tensor(self.loss) else float(self.loss)
+                        display_epoch = epoch_idx if epoch_idx is not None else epoch
+                        interval = max(int(self.args.progress_log_interval or 1), 1)
+                        if progress_idx % interval == 0 or progress_idx >= tot:
+                            print(
+                                f"[Train] epoch={display_epoch} step={progress_idx}/{tot} "
+                                f"loss={loss_value:.4f} elapsed={elapsed}s"
+                            )
+        return actual_batches
 
     def zero_grad(self):
         self.loss = 0.
@@ -553,7 +615,19 @@ class NavCMTAgent:
                 lang_cls=input['lang_cls'],
                 topo_memory_outputs=topo_memory_outputs,
                 current_t=t,                      # 【新增】告诉模型现在是第几步
-                time_steps=input['time_steps']    # 【新增】告诉模型过去特征的时间标签
+                time_steps=input['time_steps'],    # 【新增】告诉模型过去特征的时间标签
+                umti_debug_context={
+                    "enabled": bool(
+                        train_ml is not None
+                        and self.umti_debug_enabled
+                        and self.default_gpu
+                        and getattr(self.args, "debug_memory_tokens", False)
+                    ),
+                    "epoch": self.umti_debug_epoch,
+                    "batch_idx": self.umti_debug_batch_idx,
+                    "phase": self.umti_debug_phase,
+                    "timestep": t,
+                },
             )
             update_only_topo_stat_keys = {
                 'create_place_nodes_count',
@@ -593,7 +667,8 @@ class NavCMTAgent:
 
             if (
                 train_ml is None
-                and self.args.use_topo_memory
+                and self.args.enable_topo_memory
+                and self.topo_memory_manager is not None
                 and self.default_gpu
                 and t == 0
                 and self.topo_eval_debug_batches < self.topo_eval_debug_limit
@@ -657,7 +732,8 @@ class NavCMTAgent:
             input['time_steps'] = torch.cat((input['time_steps'], current_time_step), dim=1)
             if (
                 train_ml is None
-                and self.args.use_topo_memory
+                and self.args.enable_topo_memory
+                and self.topo_memory_manager is not None
                 and self.default_gpu
                 and self.topo_history_debug_batches < 3
                 and t < 8
@@ -911,7 +987,8 @@ class NavCMTAgent:
 
         if (
             train_ml is None
-            and self.args.use_topo_memory
+            and self.args.enable_topo_memory
+            and self.topo_memory_manager is not None
             and self.default_gpu
             and self.topo_eval_stage_batches < self.topo_eval_debug_limit
         ):
@@ -929,7 +1006,12 @@ class NavCMTAgent:
                 )
             )
             self.topo_eval_stage_batches += 1
-        if train_ml is None and self.args.use_topo_memory and self.topo_history_debug_batches < 3:
+        if (
+            train_ml is None
+            and self.args.enable_topo_memory
+            and self.topo_memory_manager is not None
+            and self.topo_history_debug_batches < 3
+        ):
             self.topo_history_debug_batches += 1
 
         # print('[3]')
@@ -951,6 +1033,8 @@ class NavCMTAgent:
 
     def save(self, epoch, path):
         ''' Snapshot models '''
+        if not self.default_gpu:
+            return path
         the_dir, _ = os.path.split(path)
         os.makedirs(the_dir, exist_ok=True)
         states = {}
@@ -969,6 +1053,8 @@ class NavCMTAgent:
         for param in all_tuple:
             create_state(*param)
         torch.save(states, path)
+        print(f"[Checkpoint] saved to {path}")
+        return path
 
     def load(self, path):
         ''' Loads parameters (but not training state) '''
