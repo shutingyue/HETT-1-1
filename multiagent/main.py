@@ -59,6 +59,7 @@ EXPERIMENT_CONFIG_GROUPS = [
         "rank",
         "log_dir",
         "debug_ddp",
+        "debug_anomaly",
     ]),
     ("Training", [
         "epochs",
@@ -78,6 +79,36 @@ EXPERIMENT_CONFIG_GROUPS = [
         "use_memory_type_embedding",
         "num_memory_types",
         "debug_memory_tokens",
+    ]),
+    ("ELAM", [
+        "use_elam",
+        "debug_elam",
+        "num_elam_roles",
+        "elam_num_heads",
+        "elam_dropout",
+        "elam_fusion_mode",
+        "elam_aux_weight",
+        "metric_cell_loss_weight",
+        "soft_spatial_loss_weight",
+        "query_div_loss_weight",
+        "soft_spatial_sigma",
+    ]),
+    ("UASC", [
+        "use_uasc",
+        "uasc_control_mode",
+        "uasc_hidden_size",
+        "uasc_dropout",
+        "uasc_aux_dim",
+        "uasc_lambda_conf",
+        "uasc_lambda_stage",
+        "uasc_lambda_stop",
+        "use_uasc_calib",
+        "uasc_lambda_calib",
+        "uasc_stage_radius",
+        "uasc_tau_conf",
+        "uasc_tau_stage",
+        "uasc_tau_stop",
+        "uasc_debug",
     ]),
     ("Memory", [
         "grid_size",
@@ -104,7 +135,6 @@ EXPERIMENT_CONFIG_GROUPS = [
     ("Reserved Future Modules", [
         "use_semantic_nodes",
         "max_semantic_nodes",
-        "use_elam",
         "use_uncertainty_policy",
         "use_landmark_nodes",
         "use_event_nodes",
@@ -168,6 +198,36 @@ def format_compression_logs(logs):
         mean_value = sum(logs[key]) / max(len(logs[key]), 1)
         values.append((key, mean_value))
     return "compression " + " ".join(f"{key} {value:.4f}" for key, value in values)
+
+
+def format_elam_logs(logs):
+    return (
+        "ELAM_loss {elam:.4f} metric_cell {metric:.4f} soft_spatial {spatial:.4f} "
+        "query_div {query:.4f} align_conf {conf:.4f} align_entropy {entropy:.4f}"
+    ).format(
+        elam=_mean_log_value(logs, 'elam_loss_mean'),
+        metric=_mean_log_value(logs, 'metric_cell_loss_mean'),
+        spatial=_mean_log_value(logs, 'soft_spatial_loss_mean'),
+        query=_mean_log_value(logs, 'query_div_loss_mean'),
+        conf=_mean_log_value(logs, 'alignment_confidence_mean'),
+        entropy=_mean_log_value(logs, 'alignment_entropy_mean'),
+    )
+
+
+def format_uasc_logs(logs):
+    return (
+        "UASC_conf {conf:.4f} UASC_stage {stage:.4f} UASC_stop {stop:.4f} "
+        "UASC_total {total:.4f} coarse_conf {mean_conf:.4f} "
+        "stage_prob {mean_stage:.4f} stop_prob {mean_stop:.4f}"
+    ).format(
+        conf=_mean_log_value(logs, 'uasc_conf'),
+        stage=_mean_log_value(logs, 'uasc_stage'),
+        stop=_mean_log_value(logs, 'uasc_stop'),
+        total=_mean_log_value(logs, 'uasc_total'),
+        mean_conf=_mean_log_value(logs, 'uasc_mean_coarse_conf'),
+        mean_stage=_mean_log_value(logs, 'uasc_mean_stage_prob'),
+        mean_stop=_mean_log_value(logs, 'uasc_mean_stop_prob'),
+    )
 
 
 def _mean_log_value(logs, key, default=0.0):
@@ -544,6 +604,10 @@ def train(args, train_env, val_envs, rank=-1):
                     stage1_step, stage2_step, stage2_rotate)
             )
             append_train_record(record_file, "\n%s" % format_compression_logs(agent.logs))
+            if args.use_elam:
+                append_train_record(record_file, "\n%s" % format_elam_logs(agent.logs))
+            if args.use_uasc:
+                append_train_record(record_file, "\n%s" % format_uasc_logs(agent.logs))
             if args.enable_topo_memory:
                 append_train_record(record_file, "\n%s" % format_topo_logs(agent.logs))
             append_train_record(record_file, "\nactual_train_batches_this_epoch %d" % actual_train_batches)

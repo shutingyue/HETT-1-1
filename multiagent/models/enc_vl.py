@@ -33,7 +33,7 @@ class EncoderVL(nn.Module):
         self.enc_pos_learn = None
         self.enc_token = None
         self.enc_layernorm = nn.LayerNorm(args.demb)
-        self.enc_dropout = nn.Dropout(args.dropout_emb, inplace=True)
+        self.enc_dropout = nn.Dropout(args.dropout_emb, inplace=False)
 
     def forward(
             self,
@@ -248,7 +248,7 @@ class EncoderVL(nn.Module):
 #         self.enc_pos_learn = None
 #         self.enc_token = None
 #         self.enc_layernorm = nn.LayerNorm(args.demb)
-#         self.enc_dropout = nn.Dropout(args.dropout_emb, inplace=True)
+#         self.enc_dropout = nn.Dropout(args.dropout_emb, inplace=False)
 #
 #     def forward(
 #             self,

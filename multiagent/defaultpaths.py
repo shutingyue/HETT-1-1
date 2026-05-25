@@ -21,4 +21,4 @@ MTURK_TRAJECTORY_DIR = DATA_BASE / "refined_citynav" / "processed_citynav"
 # 根据截图，refined_citynav 下没看到 rgbd 和 subblocks，
 # 如果它们在别处，请修改下方路径；如果还没解压，可以先保持这样
 ORTHO_IMAGE_DIR = DATA_BASE / "refined_citynav" / "rgbd"
-SUBBLOCKS_DIR = DATA_BASE / "refined_citynav" / "subblocks"
+SUBBLOCKS_DIR = DATA_BASE / "refined_citynav" / "subblocks"  

@@ -7,6 +7,8 @@ from torch.nn import functional as F
 from .goal_predictor import MapEncoder
 from .topo_memory import TopoMemoryBuilder
 from .umti import UMTIMemoryAdapter
+from .elam import ELAMv1
+from .uasc import UASCController, build_uasc_labels
 
 
 class SoftDotAttention(nn.Module):
@@ -49,7 +51,7 @@ class SoftDotAttention(nn.Module):
         attn = torch.bmm(context, target).squeeze(2)  # batch x seq_len
         if mask is not None:
             # -Inf masking prior to the softmax 
-            attn.data.masked_fill_(mask, -float('inf'))
+            attn = attn.masked_fill(mask, -float('inf'))
         attn = self.sm(attn)
         attn3 = attn.view(attn.size(0), 1, attn.size(1))  # batch x 1 x seq_len
 
@@ -134,12 +136,30 @@ class ET(nn.Module):
         self.text_proj = nn.Linear(768, 768)
         self.grid_proj = nn.Linear(768, 768)
         self.use_umti = bool(getattr(args, "use_umti", False))
+        self.use_elam = bool(getattr(args, "use_elam", False))
+        self.use_uasc = bool(getattr(args, "use_uasc", False))
+        self.uasc_debug = bool(getattr(args, "uasc_debug", False))
+        if self.use_elam and not self.use_umti:
+            raise ValueError("ELAM requires use_umti=True because it aligns language queries to UMTI memory tokens.")
         # Stage 1 routes topo place nodes only through UMTI. Keeping the legacy
         # topo branch dormant preserves the original HETT path whenever UMTI is off.
         self.use_topo_memory = False
         self.use_time_decay = bool(getattr(args, "use_time_decay", False))
         if self.use_umti:
             self.umti_adapter = UMTIMemoryAdapter(args, args.demb)
+        if self.use_elam:
+            self.elam = ELAMv1(args, args.demb)
+        if self.use_uasc:
+            self.uasc = UASCController(
+                hidden_size=int(getattr(args, "uasc_hidden_size", args.demb)),
+                dropout=float(getattr(args, "uasc_dropout", 0.1)),
+                aux_dim=int(getattr(args, "uasc_aux_dim", 9)),
+                lambda_conf=float(getattr(args, "uasc_lambda_conf", 0.2)),
+                lambda_stage=float(getattr(args, "uasc_lambda_stage", 0.2)),
+                lambda_stop=float(getattr(args, "uasc_lambda_stop", 0.5)),
+                lambda_calib=float(getattr(args, "uasc_lambda_calib", 0.1)),
+                use_calib=bool(getattr(args, "use_uasc_calib", False)),
+            )
         if self.use_topo_memory:
             self.topo_memory_builder = TopoMemoryBuilder(args)
             self.topo_goal_offset = nn.Sequential(
@@ -361,6 +381,7 @@ class ET(nn.Module):
         topo_landmarks = inputs.get('topo_landmarks', None)
         topo_eval_debug = False
         topo_eval_batch_idx = None
+        elam_outputs = None
 
         candidate_token_features = []
         candidate_token_positions = []
@@ -450,6 +471,22 @@ class ET(nn.Module):
                 topo_memory_state=topo_memory_outputs,
                 batch=umti_batch,
             )
+            if self.use_elam:
+                elam_memory_tokens = memory_pack["tokens"].contiguous().clone()
+                elam_outputs = self.elam(
+                    instruction_tokens=emb_lang,
+                    instruction_mask=inputs.get("lang_mask", None),
+                    memory_tokens=elam_memory_tokens,
+                    memory_mask=memory_pack["mask"],
+                    memory_positions=memory_pack.get("positions", None),
+                    memory_type_ids=memory_pack.get("type_ids", None),
+                    target_cell_labels=inputs.get("target_cell_labels", None),
+                    target_positions=inputs.get("target_positions", None),
+                    grid_shape=(self.args.grid_size, self.args.grid_size),
+                )
+                for key, value in elam_outputs.get("stats", {}).items():
+                    if isinstance(value, (int, float)):
+                        compression_stats[key].append(float(value))
             emb_candidates = memory_pack["tokens"]
             spatial_padding_mask = ~memory_pack["mask"].bool()
             for key, value in memory_pack.get("stats", {}).items():
@@ -762,6 +799,39 @@ class ET(nn.Module):
         direction = output / norm
 
         progress = self.decoder_2_progress_full(decoder_input)
+        uasc_out = None
+        if self.use_uasc:
+            directions = inputs.get("directions", None)
+            current_pos = directions[:, -1, -2:] if directions is not None and directions.shape[1] > 0 else None
+            goal_pos = inputs.get("target_positions", None)
+            success_radius = float(getattr(self.args, "success_dist", 20.0))
+            stage_radius = float(getattr(self.args, "uasc_stage_radius", 30.0))
+            # ET predicts normalized map coordinates, so UASC pseudo-label radii use
+            # the same coordinate system as current_pos, pred_goals, and target_positions.
+            if float(getattr(self.args, "map_meters", 0.0)) > 0.0:
+                success_radius = success_radius / float(self.args.map_meters)
+                stage_radius = stage_radius / float(self.args.map_meters)
+            uasc_labels = build_uasc_labels(
+                pred_target=pred_goals,
+                current_pos=current_pos,
+                goal_pos=goal_pos,
+                progress_gt=inputs.get("progress_gt", None),
+                step_idx=inputs.get("current_t", None),
+                success_radius=success_radius,
+                stage_radius=stage_radius,
+            )
+            uasc_out = self.uasc(
+                coarse_feat=goal_decoder_input,
+                fine_feat=action_decoder_input,
+                progress=progress,
+                pred_target=pred_goals,
+                current_pos=current_pos,
+                goal_pos=goal_pos,
+                align_conf=elam_outputs.get("alignment_confidence") if elam_outputs is not None else None,
+                align_entropy=elam_outputs.get("alignment_entropy") if elam_outputs is not None else None,
+                labels=uasc_labels,
+                return_debug=self.uasc_debug,
+            )
 
         # The training label still lives in the original grid_size^2 cell space. We therefore
         # gather each original cell's logit from the compressed token that represents it.
@@ -818,4 +888,9 @@ class ET(nn.Module):
         else:
             self.topo_debug_cache = None
 
-        return direction, progress, pred_goals, target_logits, emb_frames + emb_directions, mean_stats
+        outputs = (direction, progress, pred_goals, target_logits, emb_frames + emb_directions, mean_stats)
+        if self.use_elam:
+            outputs = outputs + (elam_outputs,)
+        if self.use_uasc:
+            outputs = outputs + (uasc_out,)
+        return outputs

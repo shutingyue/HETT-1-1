@@ -31,21 +31,25 @@ class PosEncoding(nn.Module):
         enc = enc / math.sqrt(self.d_model)
         lang = lang + enc[:, : lang.shape[1]]
 
+        encoded_frames = []
         for i in range(frames.shape[0]):
             start_idx = len_lang
             end_idx = len_lang + frames.shape[1]
             if end_idx > enc.shape[1]:
                 end_idx = enc.shape[1]
                 start_idx = enc.shape[1] - frames.shape[1]
-            frames[i] = frames[i] + enc[0, start_idx:end_idx]
+            encoded_frames.append(frames[i] + enc[0, start_idx:end_idx])
+        frames = torch.stack(encoded_frames, dim=0)
         # use the same position indices for directions as for the frames
+        encoded_directions = []
         for i in range(directions.shape[0]):
             start_idx = len_lang
             end_idx = len_lang + directions.shape[1]
             if end_idx > enc.shape[1]:
                 end_idx = enc.shape[1]
                 start_idx = enc.shape[1] - directions.shape[1]
-            directions[i] = directions[i] + enc[0, start_idx:end_idx]
+            encoded_directions.append(directions[i] + enc[0, start_idx:end_idx])
+        directions = torch.stack(encoded_directions, dim=0)
         return lang, frames, directions
 
 
@@ -76,35 +80,43 @@ class MapPosEncoding(nn.Module):
         enc = enc / math.sqrt(self.d_model)
         lang = lang + enc[:, : lang.shape[1]]
 
+        encoded_frames = []
         for i in range(frames.shape[0]):
             start_idx = len_lang
             end_idx = len_lang + frames.shape[1]
             if end_idx > enc.shape[1]:
                 end_idx = enc.shape[1]
                 start_idx = enc.shape[1] - frames.shape[1]
-            frames[i] = frames[i] + enc[0, start_idx:end_idx]
+            encoded_frames.append(frames[i] + enc[0, start_idx:end_idx])
+        frames = torch.stack(encoded_frames, dim=0)
         # use the same position indices for directions as for the frames
+        encoded_directions = []
         for i in range(directions.shape[0]):
             start_idx = len_lang
             end_idx = len_lang + directions.shape[1]
             if end_idx > enc.shape[1]:
                 end_idx = enc.shape[1]
                 start_idx = enc.shape[1] - directions.shape[1]
-            directions[i] = directions[i] + enc[0, start_idx:end_idx]
+            encoded_directions.append(directions[i] + enc[0, start_idx:end_idx])
+        directions = torch.stack(encoded_directions, dim=0)
+        encoded_maps = []
         for i in range(maps.shape[0]):
             start_idx = len_lang
             end_idx = len_lang + maps.shape[1]
             if end_idx > enc.shape[1]:
                 end_idx = enc.shape[1]
                 start_idx = enc.shape[1] - maps.shape[1]
-            maps[i] = maps[i] + enc[0, start_idx:end_idx]
+            encoded_maps.append(maps[i] + enc[0, start_idx:end_idx])
+        maps = torch.stack(encoded_maps, dim=0)
+        encoded_positions = []
         for i in range(positions.shape[0]):
             start_idx = len_lang + frames.shape[1]
             end_idx = len_lang + frames.shape[1] + positions.shape[1]
             if end_idx > enc.shape[1]:
                 end_idx = enc.shape[1]
                 start_idx = enc.shape[1] - positions.shape[1]
-            positions[i] = positions[i] + enc[0, start_idx:end_idx]
+            encoded_positions.append(positions[i] + enc[0, start_idx:end_idx])
+        positions = torch.stack(encoded_positions, dim=0)
         return lang, frames, directions, maps, positions
 
 
@@ -135,21 +147,26 @@ class CanPosEncoding(nn.Module):
         enc = enc / math.sqrt(self.d_model)
         lang = lang + enc[:, : lang.shape[1]]
 
+        encoded_frames = []
         for i in range(frames.shape[0]):
             start_idx = len_lang
             end_idx = len_lang + frames.shape[1]
             if end_idx > enc.shape[1]:
                 end_idx = enc.shape[1]
                 start_idx = enc.shape[1] - frames.shape[1]
-            frames[i] = frames[i] + enc[0, start_idx:end_idx]
+            encoded_frames.append(frames[i] + enc[0, start_idx:end_idx])
+        frames = torch.stack(encoded_frames, dim=0)
         # use the same position indices for directions as for the frames
+        encoded_directions = []
         for i in range(directions.shape[0]):
             start_idx = len_lang
             end_idx = len_lang + directions.shape[1]
             if end_idx > enc.shape[1]:
                 end_idx = enc.shape[1]
                 start_idx = enc.shape[1] - directions.shape[1]
-            directions[i] = directions[i] + enc[0, start_idx:end_idx]
+            encoded_directions.append(directions[i] + enc[0, start_idx:end_idx])
+        directions = torch.stack(encoded_directions, dim=0)
+        encoded_maps = []
         for i in range(maps.shape[0]):
             start_idx = len_lang
             end_idx = len_lang + maps.shape[1]
@@ -157,21 +174,26 @@ class CanPosEncoding(nn.Module):
                 end_idx = enc.shape[1]
                 start_idx = enc.shape[1] - maps.shape[1]
             # print(maps[i].shape, enc[0, start_idx:end_idx].shape)
-            maps[i] = maps[i] + enc[0, start_idx:end_idx]
+            encoded_maps.append(maps[i] + enc[0, start_idx:end_idx])
+        maps = torch.stack(encoded_maps, dim=0)
+        encoded_positions = []
         for i in range(positions.shape[0]):
             start_idx = len_lang + frames.shape[1]
             end_idx = len_lang + frames.shape[1] + positions.shape[1]
             if end_idx > enc.shape[1]:
                 end_idx = enc.shape[1]
                 start_idx = enc.shape[1] - positions.shape[1]
-            positions[i] = positions[i] + enc[0, start_idx:end_idx]
+            encoded_positions.append(positions[i] + enc[0, start_idx:end_idx])
+        positions = torch.stack(encoded_positions, dim=0)
+        encoded_centroids = []
         for i in range(centroids.shape[0]):
             start_idx = len_lang + frames.shape[1] + positions.shape[1]
             end_idx = len_lang + frames.shape[1] + positions.shape[1] + centroids.shape[1]
             if end_idx > enc.shape[1]:
                 end_idx = enc.shape[1]
                 start_idx = enc.shape[1] - centroids.shape[1]
-            centroids[i] = centroids[i] + enc[0, start_idx:end_idx]
+            encoded_centroids.append(centroids[i] + enc[0, start_idx:end_idx])
+        centroids = torch.stack(encoded_centroids, dim=0)
 
         return lang, frames, directions, maps, positions, centroids
 
@@ -208,9 +230,9 @@ class PosLearnedEncoding(nn.Module):
         pos_frames = torch.stack([torch.arange(0, frames.shape[1]) + l for l in lens_lang])
         # use the same position indices for directions as for the frames
         pos_directions = torch.stack([torch.arange(0, directions.shape[1]) + l for l in lens_lang])
-        lang += self.emb(pos_lang.to(lang.device))
-        frames += self.emb(pos_frames.to(frames.device))
-        directions += self.emb(pos_directions.to(directions.device))
+        lang = lang + self.emb(pos_lang.to(lang.device))
+        frames = frames + self.emb(pos_frames.to(frames.device))
+        directions = directions + self.emb(pos_directions.to(directions.device))
         return lang, frames, directions
 
 
@@ -227,13 +249,13 @@ class TokenLearnedEncoding(nn.Module):
     def forward(self, lang, frames, directions):
         token_lang = torch.ones(lang.shape[:2], device=lang.device, dtype=torch.long) * 0
         token_lang_emb = self.emb(token_lang)
-        lang += token_lang_emb
+        lang = lang + token_lang_emb
         token_frames = torch.ones(frames.shape[:2], device=frames.device, dtype=torch.long) * 1
         token_frames_emb = self.emb(token_frames)
-        frames += token_frames_emb
+        frames = frames + token_frames_emb
         token_directions = torch.ones(directions.shape[:2], device=directions.device, dtype=torch.long) * 2
         token_directions_emb = self.emb(token_directions)
-        directions += token_directions_emb
+        directions = directions + token_directions_emb
         return lang, frames, directions
 
 
@@ -274,10 +296,11 @@ class InstrLangEncoding(PosLangEncoding):
         counts = torch.zeros_like(tokens_mask)[:, 0].long()
         instrs = torch.zeros_like(tokens_mask).long()
         # offset the tokens by 1
-        tokens_mask[:, 1:] = tokens_mask.clone()[:, :-1]
+        shifted_tokens_mask = tokens_mask.clone()
+        shifted_tokens_mask[:, 1:] = tokens_mask[:, :-1]
         for i in range(tokens_mask.shape[1] - 1):
             instrs[:, i] = counts
-            counts += tokens_mask[:, i + 1] == True
+            counts = counts + (shifted_tokens_mask[:, i + 1] == True)
         instrs[:, -1] = instrs[:, -2]
         pe_tokens = self.pe[0, instrs]
         x = x + pe_tokens / math.sqrt(self.d_model)

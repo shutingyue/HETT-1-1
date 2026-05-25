@@ -403,9 +403,11 @@ class NavCMTAgent:
                 # print("--- One rollout takes %s seconds ---" % (time.time() - train_loop_start_time))
 
                 # print(self.rank, epoch, self.loss)
-                # torch.autograd.set_detect_anomaly(True)
-
-                self.loss.backward()
+                if getattr(self.args, "debug_anomaly", False):
+                    with torch.autograd.set_detect_anomaly(True):
+                        self.loss.backward()
+                else:
+                    self.loss.backward()
                 # print('suc')
 
                 torch.nn.utils.clip_grad_norm_(self.vln_model.parameters(), 40.)
@@ -515,6 +517,26 @@ class NavCMTAgent:
         progress_loss = 0.
         goal_predict_loss = 0.
         target_predict_loss = 0.
+        elam_aux_loss = torch.tensor(0.).cuda()
+        metric_cell_loss = torch.tensor(0.).cuda()
+        soft_spatial_loss = torch.tensor(0.).cuda()
+        query_div_loss = torch.tensor(0.).cuda()
+        elam_log_loss_sum = torch.tensor(0.).cuda()
+        metric_cell_log_sum = torch.tensor(0.).cuda()
+        soft_spatial_log_sum = torch.tensor(0.).cuda()
+        query_div_log_sum = torch.tensor(0.).cuda()
+        alignment_conf_log_sum = torch.tensor(0.).cuda()
+        alignment_entropy_log_sum = torch.tensor(0.).cuda()
+        elam_log_steps = 0
+        uasc_aux_loss = torch.tensor(0.).cuda()
+        uasc_conf_log_sum = torch.tensor(0.).cuda()
+        uasc_stage_log_sum = torch.tensor(0.).cuda()
+        uasc_stop_log_sum = torch.tensor(0.).cuda()
+        uasc_total_log_sum = torch.tensor(0.).cuda()
+        uasc_coarse_conf_log_sum = torch.tensor(0.).cuda()
+        uasc_stage_prob_log_sum = torch.tensor(0.).cuda()
+        uasc_stop_prob_log_sum = torch.tensor(0.).cuda()
+        uasc_log_steps = 0
 
         stage1_step = 0
         stage2_step = 0
@@ -530,6 +552,7 @@ class NavCMTAgent:
             'frames': torch.zeros(batch_size, 0, 512, 49).cuda(),
             'lenths': [0 for _ in range(batch_size)],
             'lang': lang_features,
+            'lang_mask': attention_mask,
             'candidates': global_positions,
             'centroids': torch.zeros((batch_size, 0, 2)).cuda(),
             'lang_cls': linear_cls,
@@ -597,7 +620,17 @@ class NavCMTAgent:
             if self.args.enable_topo_memory and self.topo_memory_manager is not None:
                 topo_memory_outputs = self.topo_memory_manager.retrieve_batch(lang_features[:, 0, :])
 
-            pred_direction, pred_progress, pred_goals, pred_logits, grid_ft, compression_stats = self.vln_model(
+            target_positions = None
+            target_cell_labels = None
+            progress_gt_input = None
+            if all('normalized_goal' in ob for ob in obs):
+                target_positions = torch.from_numpy(np.array([ob['normalized_goal'] for ob in obs], dtype=np.float32))
+            if all('grid_goal' in ob for ob in obs):
+                target_cell_labels = torch.from_numpy(np.array([ob['grid_goal'] for ob in obs], dtype=np.int64))
+            if all('progress' in ob for ob in obs):
+                progress_gt_input = torch.from_numpy(np.array([ob['progress'] for ob in obs], dtype=np.float32))
+
+            model_outputs = self.vln_model(
                 directions=input['directions'],
                 frames=input['frames'],
                 lenths=input['lenths'],
@@ -610,9 +643,13 @@ class NavCMTAgent:
                 current_grid=torch.tensor(np.array([ob['cur_grid'] for ob in obs]), dtype=torch.long).cuda(),
                 maps=input['maps'],
                 lang=input['lang'],
+                lang_mask=input['lang_mask'],
                 candidates=input['candidates'],
                 centroids=input['centroids'],
                 lang_cls=input['lang_cls'],
+                target_cell_labels=target_cell_labels,
+                target_positions=target_positions,
+                progress_gt=progress_gt_input,
                 topo_memory_outputs=topo_memory_outputs,
                 current_t=t,                      # 【新增】告诉模型现在是第几步
                 time_steps=input['time_steps'],    # 【新增】告诉模型过去特征的时间标签
@@ -629,6 +666,75 @@ class NavCMTAgent:
                     "timestep": t,
                 },
             )
+            pred_direction, pred_progress, pred_goals, pred_logits, grid_ft, compression_stats = model_outputs[:6]
+            elam_outputs = None
+            uasc_outputs = None
+            for extra_output in model_outputs[6:]:
+                if not isinstance(extra_output, dict):
+                    continue
+                if "alignment_confidence" in extra_output:
+                    elam_outputs = extra_output
+                elif "coarse_conf" in extra_output:
+                    uasc_outputs = extra_output
+
+            if uasc_outputs is not None and bool(getattr(self.args, "uasc_debug", False)):
+                coarse_conf = uasc_outputs["coarse_conf"].detach().cpu()
+                stage_prob = uasc_outputs["stage_prob"].detach().cpu()
+                stop_prob = uasc_outputs["stop_prob"].detach().cpu()
+                for batch_idx in range(batch_size):
+                    if ended[batch_idx]:
+                        continue
+                    traj[batch_idx]["uasc_coarse_conf"].append(float(coarse_conf[batch_idx].item()))
+                    traj[batch_idx]["uasc_stage_prob"].append(float(stage_prob[batch_idx].item()))
+                    traj[batch_idx]["uasc_stop_prob"].append(float(stop_prob[batch_idx].item()))
+
+            if train_ml is not None and elam_outputs is not None:
+                aux_losses = elam_outputs.get("aux_losses", {})
+                zero_aux = torch.tensor(0., device=pred_logits.device)
+                step_metric = aux_losses.get("metric_cell", zero_aux)
+                step_spatial = aux_losses.get("soft_spatial", zero_aux)
+                step_query_div = aux_losses.get("query_div", zero_aux)
+                step_elam_loss = (
+                    float(getattr(self.args, "elam_aux_weight", 1.0))
+                    * (
+                        float(getattr(self.args, "metric_cell_loss_weight", 1.0)) * step_metric
+                        + float(getattr(self.args, "soft_spatial_loss_weight", 0.5)) * step_spatial
+                        + float(getattr(self.args, "query_div_loss_weight", 0.1)) * step_query_div
+                    )
+                )
+                if not torch.isfinite(step_elam_loss):
+                    raise RuntimeError("ELAM loss became non-finite.")
+                elam_aux_loss = elam_aux_loss + step_elam_loss * batch_size
+                metric_cell_loss = metric_cell_loss + step_metric.detach() * batch_size
+                soft_spatial_loss = soft_spatial_loss + step_spatial.detach() * batch_size
+                query_div_loss = query_div_loss + step_query_div.detach() * batch_size
+                elam_log_loss_sum = elam_log_loss_sum + step_elam_loss.detach()
+                metric_cell_log_sum = metric_cell_log_sum + step_metric.detach()
+                soft_spatial_log_sum = soft_spatial_log_sum + step_spatial.detach()
+                query_div_log_sum = query_div_log_sum + step_query_div.detach()
+                alignment_conf_log_sum = alignment_conf_log_sum + elam_outputs["alignment_confidence"].detach().mean()
+                alignment_entropy_log_sum = alignment_entropy_log_sum + elam_outputs["alignment_entropy"].detach().mean()
+                elam_log_steps += 1
+
+            if train_ml is not None and uasc_outputs is not None:
+                uasc_losses = uasc_outputs.get("losses", {})
+                if "uasc_total" in uasc_losses:
+                    zero_uasc = torch.tensor(0., device=pred_logits.device)
+                    step_uasc_total = uasc_losses["uasc_total"]
+                    if not torch.isfinite(step_uasc_total):
+                        raise RuntimeError("UASC loss became non-finite.")
+                    uasc_aux_loss = uasc_aux_loss + step_uasc_total * batch_size
+                    uasc_conf_log_sum = uasc_conf_log_sum + uasc_losses.get("uasc_conf", zero_uasc).detach()
+                    uasc_stage_log_sum = uasc_stage_log_sum + uasc_losses.get("uasc_stage", zero_uasc).detach()
+                    uasc_stop_log_sum = uasc_stop_log_sum + uasc_losses.get("uasc_stop", zero_uasc).detach()
+                    uasc_total_log_sum = uasc_total_log_sum + step_uasc_total.detach()
+                    uasc_coarse_conf_log_sum = (
+                        uasc_coarse_conf_log_sum + uasc_outputs["coarse_conf"].detach().mean()
+                    )
+                    uasc_stage_prob_log_sum = uasc_stage_prob_log_sum + uasc_outputs["stage_prob"].detach().mean()
+                    uasc_stop_prob_log_sum = uasc_stop_prob_log_sum + uasc_outputs["stop_prob"].detach().mean()
+                    uasc_log_steps += 1
+
             update_only_topo_stat_keys = {
                 'create_place_nodes_count',
                 'merge_place_nodes_count',
@@ -797,11 +903,11 @@ class NavCMTAgent:
                     # print(pred_direction[i].view(-1), true_sin_cos)
                     if not ended[i]:
                         # if stage1_ended[i]:
-                        direction_loss += self.progress_regression(pred_direction[i].view(-1), true_sin_cos)
+                        direction_loss = direction_loss + self.progress_regression(pred_direction[i].view(-1), true_sin_cos)
 
-                        progress_loss += self.progress_regression(pred_progress[i].view(-1),
-                                                                  gt_progress[i].view(-1).cuda())
-                        goal_predict_loss += F.mse_loss(pred_goals[i].view(-1), gt_goal[i].view(-1).cuda())
+                        progress_loss = progress_loss + self.progress_regression(pred_progress[i].view(-1),
+                                                                                 gt_progress[i].view(-1).cuda())
+                        goal_predict_loss = goal_predict_loss + F.mse_loss(pred_goals[i].view(-1), gt_goal[i].view(-1).cuda())
                         # print(pred_goals[i], gt_goal[i], goal_predict_loss)
 
                     # ml_loss += direction_loss
@@ -813,7 +919,7 @@ class NavCMTAgent:
                     if self.default_gpu and progress_loss != progress_loss:  # debug for nan loss
                         print('0', progress_loss)
                 # print(at_direction, gt_direction, ml_loss)
-                target_predict_loss += self.criterion(pred_logits, gt_target.unsqueeze(1).cuda())
+                target_predict_loss = target_predict_loss + self.criterion(pred_logits, gt_target.unsqueeze(1).cuda())
                 # print(pred_logits.shape)
             # Log the trajectory
             # print(at_direction, gt_direction)
@@ -962,9 +1068,11 @@ class NavCMTAgent:
         if train_ml is not None:
             # print(ml_loss)
             # ml_loss = direction_loss + progress_loss
-            ml_loss = 1 * direction_loss + 0.1 * progress_loss + 2 * goal_predict_loss + 0.1 * target_predict_loss
+            ml_loss = 1 * direction_loss + 0.1 * progress_loss + 2 * goal_predict_loss + 0.1 * target_predict_loss + elam_aux_loss
+            if getattr(self.args, "use_uasc", False):
+                ml_loss = ml_loss + uasc_aux_loss
             # ml_loss = progress_loss + goal_predict_loss
-            self.loss += ml_loss * train_ml / batch_size
+            self.loss = self.loss + ml_loss * train_ml / batch_size
 
             # self.logs['ml_loss'].append((ml_loss * train_ml / batch_size).item())
 
@@ -973,6 +1081,23 @@ class NavCMTAgent:
             self.logs['goal_predict_loss'].append((goal_predict_loss * train_ml / batch_size).item())
             self.logs['target_predict_loss'].append((target_predict_loss * train_ml / batch_size).item())
             self.logs['IL_loss'].append((ml_loss * train_ml / batch_size).item())
+            if getattr(self.args, "use_elam", False):
+                normalizer = max(elam_log_steps, 1)
+                self.logs['elam_loss_mean'].append((elam_log_loss_sum / normalizer).item())
+                self.logs['metric_cell_loss_mean'].append((metric_cell_log_sum / normalizer).item())
+                self.logs['soft_spatial_loss_mean'].append((soft_spatial_log_sum / normalizer).item())
+                self.logs['query_div_loss_mean'].append((query_div_log_sum / normalizer).item())
+                self.logs['alignment_confidence_mean'].append((alignment_conf_log_sum / normalizer).item())
+                self.logs['alignment_entropy_mean'].append((alignment_entropy_log_sum / normalizer).item())
+            if getattr(self.args, "use_uasc", False):
+                normalizer = max(uasc_log_steps, 1)
+                self.logs['uasc_conf'].append((uasc_conf_log_sum / normalizer).item())
+                self.logs['uasc_stage'].append((uasc_stage_log_sum / normalizer).item())
+                self.logs['uasc_stop'].append((uasc_stop_log_sum / normalizer).item())
+                self.logs['uasc_total'].append((uasc_total_log_sum / normalizer).item())
+                self.logs['uasc_mean_coarse_conf'].append((uasc_coarse_conf_log_sum / normalizer).item())
+                self.logs['uasc_mean_stage_prob'].append((uasc_stage_prob_log_sum / normalizer).item())
+                self.logs['uasc_mean_stop_prob'].append((uasc_stop_prob_log_sum / normalizer).item())
 
         if type(self.loss) is int:  # For safety, it will be activated if no losses are added
             self.losses.append(0.)
