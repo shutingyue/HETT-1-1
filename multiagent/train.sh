@@ -13,8 +13,8 @@ BASE_FLAGS="--world_size ${ngpus} \
       --log_dir log \
       --move_iteration 10 \
       --max_action_len 20 \
-      --darknet_model_file /mnt/HDD/data/YST/HETT/HETT/datasets/darknet/yolo_v3.cfg \
-      --darknet_weight_file /mnt/HDD/data/YST/HETT/HETT/datasets/darknet/yolo_v3.pth \
+      --darknet_model_file /data1/data/yueshuting/HETT/HETT/datasets/darknet/yolo_v3.cfg \
+      --darknet_weight_file /data1/data/yueshuting/HETT/HETT/datasets/darknet/yolo_v3.pth \
       --grid_size 5 "
 
 DEFAULT_TRAIN_FLAGS="--feedback student \

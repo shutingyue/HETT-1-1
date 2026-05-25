@@ -11,17 +11,17 @@
 [TopoEvalSpatial] batch=2 sample=0 valid_nodes=1 anchor_centers=[0.0, 0.800000011920929] offset=[0.22656606137752533, 0.2595551311969757] pred_goals=[0.017821386456489563, 0.820310354232
 [TopoEvalSpatialSummary] batch=2 pred_goals_range=([0.017821386456489563, 0.8203103542327881], [0.017821386456489563, 0.8203103542327881]) candidate_global_range=([0.0, 0.0], [0.80000001
 [TopoHistoryWrite] batch=0 rollout_step=2 current_pose=[[0.015133663080632687, 0.8230489492416382]] current_grid=[4] written_cell_id=[4.0] history_len=3
-(hett) dell@dell-Precision-7920-Tower:/mnt/HDD/data/YST/HETT/HETT/multiagent$ cd /mnt/HDD/data/YST/HETT/HETT/multiagent
-(hett) dell@dell-Precision-7920-Tower:/mnt/HDD/data/YST/HETT/HETT/multiagent$ CUDA_VISIBLE_DEVICES=0 python main.py \
+(hett) dell@dell-Precision-7920-Tower:/data1/data/yueshuting/HETT/HETT/multiagent$ cd /data1/data/yueshuting/HETT/HETT/multiagent
+(hett) dell@dell-Precision-7920-Tower:/data1/data/yueshuting/HETT/HETT/multiagent$ CUDA_VISIBLE_DEVICES=0 python main.py \
 >   --mode eval \
 >   --feedback student \
 >   --batch_size 1 \
 >   --max_action_len 10 \
 >   --move_iteration 10 \
 >   --grid_size 5 \
->   --checkpoint /mnt/HDD/data/YST/HETT/HETT/datasets/checkpoint/best_val_unseen_0 \
->   --darknet_model_file /mnt/HDD/data/YST/HETT/HETT/datasets/darknet/yolo_v3.cfg \
->   --darknet_weight_file /mnt/HDD/data/YST/HETT/HETT/datasets/darknet/yolo_v3.pth \
+>   --checkpoint /data1/data/yueshuting/HETT/HETT/datasets/checkpoint/best_val_unseen_0 \
+>   --darknet_model_file /data1/data/yueshuting/HETT/HETT/datasets/darknet/yolo_v3.cfg \
+>   --darknet_weight_file /data1/data/yueshuting/HETT/HETT/datasets/darknet/yolo_v3.pth \
 >   --use_topo_memory \
 >   --topo_use_graph_encoder \
 >   --topo_aux_grid_supervision
@@ -29,7 +29,7 @@
 generating episodes: 100%|████████████████████████████████████████████████████████████████████████████████████████████████████████████████████████████| 2470/2470 [00:25<00:00, 96.42it/s]
 generating episodes: 100%|███████████████████████████████████████████████████████████████████████████████████████████████████████████████████████████| 2697/2697 [00:25<00:00, 107.00it/s]
 generating episodes: 100%|███████████████████████████████████████████████████████████████████████████████████████████████████████████████████████████| 5281/5281 [00:49<00:00, 107.44it/s]
-Loading darknet weights from /mnt/HDD/data/YST/HETT/HETT/datasets/darknet/yolo_v3.pth
+Loading darknet weights from /data1/data/yueshuting/HETT/HETT/datasets/darknet/yolo_v3.pth
 Vision model initialized with Darknet weights.
 /home/dell/anaconda3/envs/hett/lib/python3.10/site-packages/torch/nn/modules/transformer.py:286: UserWarning: enable_nested_tensor is True, but self.use_nested_tensor is False because en
 coder_layer.self_attn.batch_first was not True(use batch_first for better inference performance)
@@ -40,7 +40,7 @@ NOTICE: LOADing ALL KEYS IN THE  vision_model
 Model parameters:  41110240
 NOTICE: DIFFERENT KEYS IN THE  vln_model
 Model parameters:  20605036
-Loaded the listener model at epoch 25 from /mnt/HDD/data/YST/HETT/HETT/datasets/checkpoint/best_val_unseen_0
+Loaded the listener model at epoch 25 from /data1/data/yueshuting/HETT/HETT/datasets/checkpoint/best_val_unseen_0
 [TopoEvalHistory] batch=0 history_features_len=[0] history_cell_ids_len=[0] history_times_len=[0] history_xy_len=[0]
 /home/dell/anaconda3/envs/hett/lib/python3.10/site-packages/torch/nn/functional.py:5109: UserWarning: Support for mismatched src_key_padding_mask and mask is deprecated. Use same type fo
 r both instead.
@@ -344,7 +344,7 @@ val_unseen , lengths: 84.84, stage1_length: 68.64, stage2_length: 16.21, sr: 1.3
 e_ne: 186.80, stage1_ne: 205.67, stage1_oracle_ne: 192.38, stage2_ne: 200.75, stage2_oracle_ne: 197.87, gt_length: 207.71, gp_sr: 0.00, oracle_gp_sr: 0.00
 test_unseen , lengths: 83.42, stage1_length: 68.21, stage2_length: 15.21, sr: 1.89, sr1: 1.23, sr2: 1.89, oracle_sr: 3.47, oracle_sr1: 3.03, oracle_sr2: 2.14, spl: 0.54, ne: 178.07, orac
 le_ne: 164.94, stage1_ne: 182.85, stage1_oracle_ne: 169.73, stage2_ne: 178.07, stage2_oracle_ne: 175.48, gt_length: 185.15, gp_sr: 0.00, oracle_gp_sr: 0.00
-(hett) dell@dell-Precision-7920-Tower:/mnt/HDD/data/YST/HETT/HETT/multiagent$
-(hett) dell@dell-Precision-7920-Tower:/mnt/HDD/data/YST/HETT/HETT/multiagent$ tmux capture-pane -p -S -300 > tmux_log02.txt
+(hett) dell@dell-Precision-7920-Tower:/data1/data/yueshuting/HETT/HETT/multiagent$
+(hett) dell@dell-Precision-7920-Tower:/data1/data/yueshuting/HETT/HETT/multiagent$ tmux capture-pane -p -S -300 > tmux_log02.txt
 
 

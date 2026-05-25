@@ -133,7 +133,7 @@ class NavCMTAgent:
 
         # Models
 
-        self.tokenizer = BertTokenizerFast.from_pretrained('/mnt/HDD/data/YST/HETT/HETT/datasets/hf_models/bert-base-uncased/')
+        self.tokenizer = BertTokenizerFast.from_pretrained('/data1/data/yueshuting/HETT/HETT/datasets/hf_models/bert-base-uncased/')
         self.lang_model = CustomBERTModel().cuda()
 
         # self.img_tensor = transforms.ToTensor()

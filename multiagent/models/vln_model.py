@@ -128,7 +128,7 @@ class SoftDotAttention(nn.Module):
 class CustomBERTModel(nn.Module):
     def __init__(self):
         super(CustomBERTModel, self).__init__()
-        self.bert = AutoModel.from_pretrained('/mnt/HDD/data/YST/HETT/HETT/datasets/hf_models/bert-base-uncased/')
+        self.bert = AutoModel.from_pretrained('/data1/data/yueshuting/HETT/HETT/datasets/hf_models/bert-base-uncased/')
         # freeze_network(self.bert)
         # for child in self.bert.children():
         #     # ct += 1

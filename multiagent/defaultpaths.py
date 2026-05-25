@@ -1,7 +1,7 @@
 from pathlib import Path
 
 # 你的项目根目录
-PROJECT_ROOT = Path("/mnt/HDD/data/YST/HETT/HETT")
+PROJECT_ROOT = Path("/data1/data/yueshuting/HETT/HETT")
 # 你的数据集根目录
 DATA_BASE = PROJECT_ROOT / "datasets"
 
