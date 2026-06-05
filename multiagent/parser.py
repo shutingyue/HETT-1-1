@@ -104,6 +104,16 @@ def parse_args():
     add_bool_flag('spatial_compression', default=False)
     parser.add_argument('--spatial_dist_threshold', type=int, default=1)
     parser.add_argument('--spatial_far_coarse_size', type=int, default=2)
+    parser.add_argument('--use_region_prompt', action='store_true', default=False)
+    parser.add_argument(
+        '--region_prompt_mode',
+        type=str,
+        choices=['original', 'replace', 'residual'],
+        default='residual',
+    )
+    parser.add_argument('--region_prompt_num', type=int, default=4)
+    parser.add_argument('--region_prompt_alpha', type=float, default=0.1)
+    parser.add_argument('--region_prompt_dropout', type=float, default=0.1)
     parser.add_argument('--use_topo_memory', action='store_true', default=False)
     add_bool_flag('use_time_decay', default=False)
     add_bool_flag('enable_topo_memory', default=False)

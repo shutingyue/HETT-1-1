@@ -20,7 +20,7 @@ from torchvision import transforms
 
 # from r2r.agent_cmt import Seq2SeqCMTAgent
 from multiagent.actions import Action
-from multiagent.defaultpaths import GOAL_PREDICTOR_CHECKPOINT_DIR
+from multiagent.defaultpaths import GOAL_PREDICTOR_CHECKPOINT_DIR, HF_BERT_BASE_UNCASED_DIR
 from multiagent.models.dark_net import Darknet
 from multiagent.models.CLIP import CLIP
 # from direction.models.ddppo.resenet_encoders import TorchVisionResNet50
@@ -132,7 +132,7 @@ class NavCMTAgent:
 
         # Models
 
-        self.tokenizer = BertTokenizerFast.from_pretrained('/mnt/HDD/data/YST/HETT/HETT/datasets/hf_models/bert-base-uncased/')
+        self.tokenizer = BertTokenizerFast.from_pretrained(str(HF_BERT_BASE_UNCASED_DIR))
         self.lang_model = CustomBERTModel().cuda()
 
         # self.img_tensor = transforms.ToTensor()

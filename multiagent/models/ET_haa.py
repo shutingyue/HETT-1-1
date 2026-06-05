@@ -5,6 +5,7 @@ from torch import nn
 from torch.nn import functional as F
 
 from .goal_predictor import MapEncoder
+from .region_prompt import RegionPromptAdapter
 from .topo_memory import TopoMemoryBuilder
 
 
@@ -100,6 +101,19 @@ class ET(nn.Module):
             nn.Tanh()
         )
         self.attention_layer_vision = SoftDotAttention(49)
+        self.region_prompt_adapter = None
+        if (
+            bool(getattr(self.args, "use_region_prompt", False))
+            and getattr(self.args, "region_prompt_mode", "residual") != "original"
+        ):
+            self.region_prompt_adapter = RegionPromptAdapter(
+                visual_dim=512,
+                embed_dim=self.args.demb,
+                num_region_queries=getattr(self.args, "region_prompt_num", 4),
+                num_heads=self.args.encoder_heads,
+                dropout=getattr(self.args, "region_prompt_dropout", 0.1),
+                instruction_dim=49,
+            )
         self.decoder_2_progress_full = nn.Sequential(
             nn.Linear(self.args.demb, 256),
             # nn.BatchNorm1d(64, eps=1e-12),
@@ -326,14 +340,51 @@ class ET(nn.Module):
         # pred_saliency = nn.functional.interpolate(h_sali,size=(224,224),mode='bilinear',align_corners=False)
         # frames_pad_emb = self.vis_feat(im_feature.view(-1, 650,7,7)).view(*im_feature.shape[:2], -1)
 
-        # embed frames and direiction (1,49) --> 768
+        # embed frames and direiction:
+        # im_feature: [B, T, 512, 49]
+        # original_att_frame_feature: [B, T, 49]
+        # original_emb_frames: [B, T, 768], the unchanged HETT visual frame path.
         im_feature = inputs["frames"]
-        att_frame_feature = torch.zeros((im_feature.shape[0], 0, 49), device=im_feature.device)
+        original_att_frame_feature = torch.zeros((im_feature.shape[0], 0, 49), device=im_feature.device)
         for i in range(im_feature.shape[1]):
             att_single_frame_feature, beta = self.attention_layer_vision(inputs["lang_cls"], im_feature[:, i, :, :])
-            att_frame_feature = torch.concat((att_frame_feature, att_single_frame_feature.unsqueeze(1)), axis=1)
+            original_att_frame_feature = torch.concat(
+                (original_att_frame_feature, att_single_frame_feature.unsqueeze(1)),
+                axis=1,
+            )
 
-        emb_frames = self.fc2(att_frame_feature.view(-1, 49)).view(*im_feature.shape[:2], -1)
+        original_emb_frames = self.fc2(original_att_frame_feature.view(-1, 49)).view(*im_feature.shape[:2], -1)
+        emb_frames = original_emb_frames
+
+        use_region_prompt = (
+            bool(getattr(self.args, "use_region_prompt", False))
+            and getattr(self.args, "region_prompt_mode", "residual") != "original"
+            and self.region_prompt_adapter is not None
+        )
+        if use_region_prompt:
+            region_tokens_all = torch.zeros(
+                (
+                    im_feature.shape[0],
+                    0,
+                    self.region_prompt_adapter.num_region_queries,
+                    self.args.demb,
+                ),
+                device=im_feature.device,
+            )
+            for i in range(im_feature.shape[1]):
+                region_tokens = self.region_prompt_adapter(im_feature[:, i, :, :], inputs["lang_cls"])
+                region_tokens_all = torch.concat((region_tokens_all, region_tokens.unsqueeze(1)), axis=1)
+
+            region_context, region_attn = self.region_prompt_adapter.select_region_context(
+                region_tokens_all,
+                inputs["lang_cls"],
+            )
+            if self.args.region_prompt_mode == "replace":
+                emb_frames = region_context
+            elif self.args.region_prompt_mode == "residual":
+                emb_frames = original_emb_frames + self.args.region_prompt_alpha * region_context
+            else:
+                emb_frames = original_emb_frames
 
         emb_maps = self.fc_map(map_feat).view(im_feature.shape[0], -1, 768)
         # print('sss', emb_frames.shape, emb_maps.shape)

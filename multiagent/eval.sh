@@ -1,5 +1,5 @@
 #!/bin/bash
-export PYTHONPATH="/mnt/HDD/data/YST/HETT/citynav:/mnt/HDD/data/YST/HETT/HETT:$PYTHONPATH"
+export PYTHONPATH="/data1/data/yueshuting/HETT/citynav:/data1/data/yueshuting/HETT/HETT:$PYTHONPATH"
 
 # ==========================================
 # 增加这一段：封印 GDAL/OpenCV 等底层 C 库的多线程，防止段错误
@@ -30,9 +30,9 @@ flag="--world_size ${ngpus} \
       --move_iteration 10 \
       --max_action_len 20 \
       --grid_size 5 \
-      --darknet_model_file /mnt/HDD/data/YST/HETT/HETT/datasets/darknet/yolo_v3.cfg \
-      --darknet_weight_file /mnt/HDD/data/YST/HETT/HETT/datasets/darknet/yolo_v3.pth \
-      --checkpoint /mnt/HDD/data/YST/HETT/HETT/datasets/checkpoint/best_val_unseen \
+      --darknet_model_file /data1/data/yueshuting/HETT/HETT/datasets/darknet/yolo_v3.cfg \
+      --darknet_weight_file /data1/data/yueshuting/HETT/HETT/datasets/darknet/yolo_v3.pth \
+      --checkpoint /data1/data/yueshuting/HETT/HETT/datasets/checkpoint/best_val_unseen \
       ${SPATIAL_FLAGS} \
       ${MEMORY_FLAGS}"
       
@@ -50,4 +50,4 @@ CUDA_VISIBLE_DEVICES='0' python -m torch.distributed.run \
     --master_addr=$MASTER_ADDR \
     --nproc_per_node=$ngpus \
     --master_port=$PORT \
-    main.py $flag
+    multiagent/main.py $flag

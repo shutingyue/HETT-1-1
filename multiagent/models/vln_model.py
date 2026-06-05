@@ -8,6 +8,7 @@ import torch.nn as nn
 import torch.nn.functional as F
 from torch.autograd import Variable
 from transformers import AutoModel, BertTokenizerFast
+from multiagent.defaultpaths import HF_BERT_BASE_UNCASED_DIR
 
 class SoftDotAttention(nn.Module):
     '''Soft Dot Attention. 
@@ -128,7 +129,7 @@ class SoftDotAttention(nn.Module):
 class CustomBERTModel(nn.Module):
     def __init__(self):
         super(CustomBERTModel, self).__init__()
-        self.bert = AutoModel.from_pretrained('/mnt/HDD/data/YST/HETT/HETT/datasets/hf_models/bert-base-uncased/')
+        self.bert = AutoModel.from_pretrained(str(HF_BERT_BASE_UNCASED_DIR))
         # freeze_network(self.bert)
         # for child in self.bert.children():
         #     # ct += 1
@@ -410,4 +411,3 @@ class ViT_LSTM_lang_only(nn.Module):
         output = self.decoder_2_action_full(lang_embeds)
 
         return h_1, c_1, output 
-

@@ -1,13 +1,14 @@
 from pathlib import Path
 
 # 你的项目根目录
-PROJECT_ROOT = Path("/mnt/HDD/data/YST/HETT/HETT")
+PROJECT_ROOT = Path(__file__).resolve().parents[1]
 # 你的数据集根目录
 DATA_BASE = PROJECT_ROOT / "datasets"
 
 # 1. 权重与 Checkpoint 路径
 WEIGHTS_DIR = DATA_BASE / "darknet"  # 对应截图中的 darknet 目录
 GOAL_PREDICTOR_CHECKPOINT_DIR = DATA_BASE / "checkpoint" # 对应截图中的 checkpoint 目录
+HF_BERT_BASE_UNCASED_DIR = DATA_BASE / "hf_models" / "bert-base-uncased"
 
 # 2. CityRefer 标注数据路径
 # 对应截图中的 refined_citynav/cityrefer
