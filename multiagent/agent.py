@@ -403,6 +403,21 @@ class NavCMTAgent:
         progress_loss = 0.
         goal_predict_loss = 0.
         target_predict_loss = 0.
+        use_region_attn_diversity = (
+            bool(getattr(self.args, 'use_region_prompt', False))
+            and bool(getattr(self.args, 'use_region_attn_diversity', False))
+        )
+        use_stop_contrast = bool(getattr(self.args, 'use_stop_contrast', False))
+        region_attn_diversity_loss = (
+            torch.tensor(0., device=lang_features.device)
+            if use_region_attn_diversity
+            else None
+        )
+        region_attn_diversity_steps = 0
+        if use_stop_contrast:
+            self._stop_contrast_scores = []
+            self._stop_contrast_progress = []
+            self._stop_contrast_valid = []
 
         stage1_step = 0
         stage2_step = 0
@@ -474,7 +489,7 @@ class NavCMTAgent:
 
 
 
-            pred_direction, pred_progress, pred_goals, pred_logits, grid_ft = self.vln_model(
+            model_outputs = self.vln_model(
                 directions=input['directions'],
                 frames=input['frames'],
                 lenths=input['lenths'],
@@ -486,6 +501,16 @@ class NavCMTAgent:
                 centroids=input['centroids'],
                 lang_cls=input['lang_cls']
             )
+            if len(model_outputs) == 6:
+                pred_direction, pred_progress, pred_goals, pred_logits, grid_ft, model_stats = model_outputs
+            else:
+                pred_direction, pred_progress, pred_goals, pred_logits, grid_ft = model_outputs
+                model_stats = {}
+            if train_ml is not None and use_region_attn_diversity:
+                value = model_stats.get('region_attn_diversity_loss')
+                if torch.is_tensor(value):
+                    region_attn_diversity_loss = region_attn_diversity_loss + value
+                    region_attn_diversity_steps += 1
 
             input['grid_fts'] = torch.cat((input['grid_fts'], grid_ft), dim=1)
             grid_index = torch.tensor(np.array([ob['cur_grid'] for ob in obs])).unsqueeze(1).cuda()
@@ -519,6 +544,16 @@ class NavCMTAgent:
             gt_goal = torch.from_numpy(np.array([ob['normalized_goal'] for ob in obs], dtype=np.float32))
             gt_progress = torch.from_numpy(np.array([ob['progress'] for ob in obs], dtype=np.float32))
             gt_target = torch.from_numpy(np.array([ob['grid_goal'] for ob in obs], dtype=np.int64))
+            if (
+                train_ml is not None
+                and use_stop_contrast
+                and 'stop_contrast_score' in model_stats
+            ):
+                self._stop_contrast_scores.append(model_stats['stop_contrast_score'])
+                self._stop_contrast_progress.append(gt_progress.view(batch_size, 1).cuda())
+                self._stop_contrast_valid.append(
+                    torch.from_numpy((~ended).astype(np.bool_)).view(batch_size, 1).cuda()
+                )
             # there is no ground truth in unseen_test set
             if not 'test' in self.env_name:
                 # Get ground truth
@@ -693,11 +728,97 @@ class NavCMTAgent:
             # print(ml_loss)
             # ml_loss = direction_loss + progress_loss
             ml_loss = 1 * direction_loss + 0.1 * progress_loss + 2 * goal_predict_loss + 0.1 * target_predict_loss
+            if use_region_attn_diversity:
+                if region_attn_diversity_steps > 0:
+                    region_attn_diversity_loss = region_attn_diversity_loss / region_attn_diversity_steps
+                else:
+                    region_attn_diversity_loss = direction_loss * 0.0
+                ml_loss = ml_loss + (
+                    float(getattr(self.args, 'region_attn_diversity_lambda', 0.01))
+                    * region_attn_diversity_loss
+                    * batch_size
+                )
+            if use_stop_contrast:
+                stop_contrast_scores = getattr(self, '_stop_contrast_scores', [])
+                stop_contrast_loss_module = getattr(self.vln_model_without_ddp, 'stop_contrast_loss', None)
+                if stop_contrast_scores and stop_contrast_loss_module is not None:
+                    stop_contrast_scores = torch.cat(stop_contrast_scores, dim=1)
+                    stop_contrast_progress = torch.cat(self._stop_contrast_progress, dim=1)
+                    stop_contrast_valid = torch.cat(self._stop_contrast_valid, dim=1)
+                    stop_contrast_loss, stop_contrast_diagnostics = (
+                        stop_contrast_loss_module.compute_loss_from_scores(
+                            scores=stop_contrast_scores,
+                            progress_target=stop_contrast_progress,
+                            valid_mask=stop_contrast_valid,
+                            progress_threshold=getattr(
+                                self.args,
+                                'stop_contrast_progress_threshold',
+                                0.8,
+                            ),
+                            positive_mode=getattr(
+                                self.args,
+                                'stop_contrast_positive_mode',
+                                'progress_threshold',
+                            ),
+                            strict_pos_threshold=getattr(
+                                self.args,
+                                'stop_contrast_strict_pos_threshold',
+                                0.95,
+                            ),
+                            hard_neg_min=getattr(
+                                self.args,
+                                'stop_contrast_hard_neg_min',
+                                0.80,
+                            ),
+                            easy_neg_max=getattr(
+                                self.args,
+                                'stop_contrast_easy_neg_max',
+                                0.50,
+                            ),
+                            use_easy_negatives=getattr(
+                                self.args,
+                                'stop_contrast_use_easy_negatives',
+                                False,
+                            ),
+                            ignore_ambiguous=getattr(
+                                self.args,
+                                'stop_contrast_ignore_ambiguous',
+                                True,
+                            ),
+                            require_both_pos_neg=getattr(
+                                self.args,
+                                'stop_contrast_require_both_pos_neg',
+                                True,
+                            ),
+                        )
+                    )
+                else:
+                    stop_contrast_loss = direction_loss * 0.0
+                    stop_contrast_diagnostics = {}
+                ml_loss = ml_loss + (
+                    float(getattr(self.args, 'stop_contrast_lambda', 0.05))
+                    * stop_contrast_loss
+                    * batch_size
+                )
+                for key, value in stop_contrast_diagnostics.items():
+                    if isinstance(value, (int, float)) and math.isfinite(float(value)):
+                        self.logs[key].append(float(value))
+                self.logs['stop_contrast_lambda'].append(
+                    float(getattr(self.args, 'stop_contrast_lambda', 0.05))
+                )
+                if stop_contrast_loss_module is not None:
+                    self.logs['stop_contrast_temperature'].append(
+                        float(getattr(stop_contrast_loss_module, 'temperature', 0.07))
+                    )
             # ml_loss = progress_loss + goal_predict_loss
             self.loss += ml_loss * train_ml / batch_size
 
             # self.logs['ml_loss'].append((ml_loss * train_ml / batch_size).item())
 
+            if use_region_attn_diversity:
+                self.logs['region_attn_diversity_loss'].append(
+                    float(region_attn_diversity_loss.detach().item())
+                )
             self.logs['direction_loss'].append((direction_loss * train_ml / batch_size).item())
             self.logs['progress_loss'].append((progress_loss * train_ml / batch_size).item())
             self.logs['goal_predict_loss'].append((goal_predict_loss * train_ml / batch_size).item())

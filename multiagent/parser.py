@@ -82,6 +82,11 @@ def parse_args():
 
     parser = argparse.ArgumentParser()
 
+    def add_bool_flag(name, default=False, help_text=None):
+        parser.add_argument(f'--{name}', dest=name, action='store_true', help=help_text)
+        parser.add_argument(f'--no-{name}', dest=name, action='store_false')
+        parser.set_defaults(**{name: default})
+
     parser.add_argument('--seed', type=int, default=0)
     parser.add_argument('--mode', type=str, choices=['train', 'eval', 'visualize'], default='train')
     parser.add_argument('--local_rank', type=int, default=-1)
@@ -92,6 +97,90 @@ def parse_args():
 
     # model
     parser.add_argument('--grid_size', type=int, default=7)
+    parser.add_argument('--use_region_prompt', action='store_true', default=False)
+    parser.add_argument(
+        '--region_prompt_mode',
+        type=str,
+        choices=['original', 'replace', 'residual'],
+        default='residual',
+    )
+    parser.add_argument('--region_prompt_alpha', type=float, default=0.1)
+    parser.add_argument('--region_prompt_num', type=int, default=4)
+    parser.add_argument('--region_prompt_dropout', type=float, default=0.1)
+    parser.add_argument(
+        '--region_prompt_scale_mode',
+        type=str,
+        choices=['none', 'sqrt_dim', 'match_original'],
+        default='sqrt_dim',
+    )
+    parser.add_argument(
+        '--region_prompt_query_init',
+        type=str,
+        choices=['random', 'orthogonal', 'pos'],
+        default='random',
+    )
+    parser.add_argument('--region_prompt_query_scale', type=float, default=0.1)
+    parser.add_argument('--region_prompt_use_pos_embed', action='store_true', default=False)
+    parser.add_argument(
+        '--region_prompt_max_spatial_tokens',
+        type=int,
+        default=0,
+        help='<=0 uses 49 to match current DarkNet raw visual tokens; set >0 to override.',
+    )
+    parser.add_argument('--region_prompt_condition_generation', action='store_true', default=False)
+    parser.add_argument('--region_prompt_fuse_instruction', action='store_true', default=False)
+    parser.add_argument('--use_region_attn_diversity', action='store_true', default=False)
+    parser.add_argument('--region_attn_diversity_lambda', type=float, default=0.01)
+    parser.add_argument(
+        '--region_attn_diversity_mode',
+        type=str,
+        choices=['cosine_square'],
+        default='cosine_square',
+    )
+    parser.add_argument('--region_attn_topk', type=int, default=5)
+    parser.add_argument('--use_stop_contrast', action='store_true', default=False)
+    parser.add_argument(
+        '--stop_contrast_visual_source',
+        type=str,
+        choices=['none', 'global_attn', 'fixed_partition', 'region_prompt'],
+        default='none',
+    )
+    parser.add_argument('--stop_contrast_lambda', type=float, default=0.05)
+    parser.add_argument('--stop_contrast_temperature', type=float, default=0.07)
+    parser.add_argument('--stop_contrast_proj_dim', type=int, default=256)
+    parser.add_argument(
+        '--stop_contrast_positive_mode',
+        type=str,
+        choices=['progress_threshold', 'conversion_aware'],
+        default='progress_threshold',
+    )
+    parser.add_argument('--stop_contrast_progress_threshold', type=float, default=0.8)
+    parser.add_argument('--stop_contrast_strict_pos_threshold', type=float, default=0.95)
+    parser.add_argument('--stop_contrast_hard_neg_min', type=float, default=0.80)
+    parser.add_argument('--stop_contrast_easy_neg_max', type=float, default=0.50)
+    parser.add_argument('--stop_contrast_use_easy_negatives', action='store_true', default=False)
+    add_bool_flag(
+        'stop_contrast_ignore_ambiguous',
+        default=True,
+        help_text='Ignore conversion-aware StopContrast samples outside strict positive / selected negative ranges.',
+    )
+    parser.add_argument('--stop_contrast_detach_visual', action='store_true', default=False)
+    add_bool_flag(
+        'stop_contrast_require_both_pos_neg',
+        default=True,
+        help_text='Skip StopContrast loss unless a batch has both positive and negative valid samples.',
+    )
+    parser.add_argument('--use_stop_visual_context', action='store_true', default=False)
+    parser.add_argument(
+        '--stop_visual_context_mode',
+        type=str,
+        choices=['global_attn', 'fixed_partition'],
+        default='global_attn',
+    )
+    parser.add_argument('--stop_visual_context_dim', type=int, default=768)
+    parser.add_argument('--stop_visual_context_num_regions', type=int, default=4)
+    parser.add_argument('--stop_visual_context_dropout', type=float, default=0.1)
+    parser.add_argument('--stop_visual_context_topk', type=int, default=5)
     parser.add_argument('--demb', type=int, default=768)
     parser.add_argument('--encoder_heads', type=int, default=12)
     parser.add_argument('--encoder_layers', type=int, default=2)
@@ -171,6 +260,31 @@ def postprocess_args(args):
 
     args.map_shape = (args.map_size, args.map_size)
     args.map_pixels_per_meter = args.map_size / args.map_meters
+    if bool(getattr(args, 'use_stop_contrast', False)):
+        stop_source = getattr(args, 'stop_contrast_visual_source', 'none')
+        if stop_source in ('global_attn', 'fixed_partition'):
+            args.use_stop_visual_context = True
+            args.stop_visual_context_mode = stop_source
+        elif stop_source == 'region_prompt':
+            if not bool(getattr(args, 'use_region_prompt', False)):
+                raise ValueError(
+                    "--stop_contrast_visual_source region_prompt requires --use_region_prompt."
+                )
+            if getattr(args, 'region_prompt_mode', 'residual') == 'original':
+                raise ValueError(
+                    "--stop_contrast_visual_source region_prompt requires region_prompt_mode residual or replace."
+                )
+
+        positive_mode = getattr(args, 'stop_contrast_positive_mode', 'progress_threshold')
+        if positive_mode == 'conversion_aware':
+            strict_pos = float(getattr(args, 'stop_contrast_strict_pos_threshold', 0.95))
+            hard_neg_min = float(getattr(args, 'stop_contrast_hard_neg_min', 0.80))
+            easy_neg_max = float(getattr(args, 'stop_contrast_easy_neg_max', 0.50))
+            if not (0.0 <= easy_neg_max <= hard_neg_min <= strict_pos <= 1.0):
+                raise ValueError(
+                    "conversion_aware thresholds must satisfy "
+                    "0 <= easy_neg_max <= hard_neg_min <= strict_pos <= 1."
+                )
 
 
     return args
