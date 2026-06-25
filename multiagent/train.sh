@@ -2,7 +2,7 @@
 set -euo pipefail
 
 ngpus=${NGPUS:-1}
-seed=0
+seed=${SEED:-0}
 
 BASE_FLAGS="--world_size ${ngpus} \
       --seed ${seed} \

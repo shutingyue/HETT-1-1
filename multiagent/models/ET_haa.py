@@ -1,11 +1,11 @@
 import torch
+import math
 from collections import defaultdict
 from .enc_vl import EncoderVL
 from torch import nn
 from torch.nn import functional as F
 
 from .goal_predictor import MapEncoder
-from .region_prompt import RegionPromptAdapter
 from .topo_memory import TopoMemoryBuilder
 
 
@@ -102,10 +102,19 @@ class ET(nn.Module):
         )
         self.attention_layer_vision = SoftDotAttention(49)
         self.region_prompt_adapter = None
+        self.stop_visual_context_adapter = None
+        self.stop_contrast_loss = None
         if (
             bool(getattr(self.args, "use_region_prompt", False))
             and getattr(self.args, "region_prompt_mode", "residual") != "original"
         ):
+            from .region_prompt import RegionPromptAdapter
+
+            region_prompt_max_spatial_tokens = int(
+                getattr(self.args, "region_prompt_max_spatial_tokens", 0)
+            )
+            if region_prompt_max_spatial_tokens <= 0:
+                region_prompt_max_spatial_tokens = 49
             self.region_prompt_adapter = RegionPromptAdapter(
                 visual_dim=512,
                 embed_dim=self.args.demb,
@@ -113,6 +122,53 @@ class ET(nn.Module):
                 num_heads=self.args.encoder_heads,
                 dropout=getattr(self.args, "region_prompt_dropout", 0.1),
                 instruction_dim=49,
+                condition_generation=getattr(self.args, "region_prompt_condition_generation", False),
+                fuse_instruction=getattr(self.args, "region_prompt_fuse_instruction", False),
+                query_init=getattr(self.args, "region_prompt_query_init", "random"),
+                query_scale=getattr(self.args, "region_prompt_query_scale", 0.1),
+                use_pos_embed=getattr(self.args, "region_prompt_use_pos_embed", False),
+                max_spatial_tokens=region_prompt_max_spatial_tokens,
+                attn_topk=getattr(self.args, "region_attn_topk", 5),
+            )
+        stop_contrast_source = getattr(self.args, "stop_contrast_visual_source", "none")
+        stop_contrast_needs_visual_context = (
+            bool(getattr(self.args, "use_stop_contrast", False))
+            and stop_contrast_source in ("global_attn", "fixed_partition")
+        )
+        if bool(getattr(self.args, "use_stop_visual_context", False)) or stop_contrast_needs_visual_context:
+            from .visual_context import StopVisualContextAdapter
+
+            stop_visual_context_mode = (
+                stop_contrast_source if stop_contrast_needs_visual_context
+                else getattr(self.args, "stop_visual_context_mode", "global_attn")
+            )
+            self.stop_visual_context_adapter = StopVisualContextAdapter(
+                mode=stop_visual_context_mode,
+                visual_dim=512,
+                embed_dim=getattr(self.args, "stop_visual_context_dim", self.args.demb),
+                num_heads=self.args.encoder_heads,
+                dropout=getattr(self.args, "stop_visual_context_dropout", 0.1),
+                instruction_dim=49,
+                num_regions=getattr(self.args, "stop_visual_context_num_regions", 4),
+                topk=getattr(self.args, "stop_visual_context_topk", 5),
+            )
+        if bool(getattr(self.args, "use_stop_contrast", False)):
+            from .stop_contrast import StopContrastLoss
+
+            if stop_contrast_source == "region_prompt" and self.region_prompt_adapter is None:
+                raise ValueError(
+                    "StopContrast source=region_prompt requires --use_region_prompt "
+                    "with region_prompt_mode residual or replace."
+                )
+            self.stop_contrast_loss = StopContrastLoss(
+                visual_source=stop_contrast_source,
+                hidden_dim=self.args.demb,
+                visual_dim=self.args.demb,
+                instruction_dim=49,
+                proj_dim=getattr(self.args, "stop_contrast_proj_dim", 256),
+                temperature=getattr(self.args, "stop_contrast_temperature", 0.07),
+                dropout=getattr(self.args, "dropout_emb", 0.1),
+                require_both_pos_neg=getattr(self.args, "stop_contrast_require_both_pos_neg", True),
             )
         self.decoder_2_progress_full = nn.Sequential(
             nn.Linear(self.args.demb, 256),
@@ -183,6 +239,93 @@ class ET(nn.Module):
     def _fuse_patch_context(self, base_feat, patch_feat, gate_layer):
         gate = torch.sigmoid(gate_layer(torch.cat((base_feat, patch_feat), dim=-1)))
         return base_feat + gate * patch_feat
+
+    def _scale_region_context(self, region_context, original_emb_frames):
+        scale_mode = getattr(self.args, "region_prompt_scale_mode", "sqrt_dim")
+        eps = 1e-6
+        if scale_mode == "none":
+            return region_context
+        if scale_mode == "sqrt_dim":
+            return region_context / math.sqrt(region_context.size(-1))
+        if scale_mode == "match_original":
+            region_norm = torch.norm(region_context, dim=-1, keepdim=True)
+            original_norm = torch.norm(original_emb_frames.detach(), dim=-1, keepdim=True)
+            return region_context / region_norm.clamp_min(eps) * original_norm
+        raise ValueError(f"Unsupported region_prompt_scale_mode: {scale_mode}")
+
+    def _append_region_prompt_diagnostics(
+        self,
+        stats,
+        original_emb_frames,
+        region_tokens_all,
+        region_context,
+        region_attn,
+    ):
+        eps = 1e-6
+        with torch.no_grad():
+            original = original_emb_frames.detach().to(torch.float32)
+            context = region_context.detach().to(torch.float32)
+            tokens = region_tokens_all.detach().to(torch.float32)
+
+            original_norm = torch.nan_to_num(original.norm(dim=-1), nan=0.0, posinf=0.0, neginf=0.0)
+            context_norm = torch.nan_to_num(context.norm(dim=-1), nan=0.0, posinf=0.0, neginf=0.0)
+            residual_ratio = (
+                float(getattr(self.args, "region_prompt_alpha", 0.0))
+                * context_norm
+                / original_norm.clamp_min(eps)
+            )
+
+            stats["region_context_norm"].append(float(context_norm.mean().item()))
+            stats["original_emb_norm"].append(float(original_norm.mean().item()))
+            stats["region_residual_ratio"].append(
+                float(torch.nan_to_num(residual_ratio, nan=0.0, posinf=0.0, neginf=0.0).mean().item())
+            )
+
+            if self.region_prompt_adapter is not None:
+                query_stats = self.region_prompt_adapter.region_query_diagnostics()
+                for key in (
+                    "region_query_norm",
+                    "region_query_offdiag_cos",
+                    "spatial_pos_embed_norm",
+                    "spatial_pos_embed_offdiag_cos",
+                ):
+                    value = query_stats.get(key)
+                    if value is not None and math.isfinite(value):
+                        stats[key].append(value)
+
+            attn = region_attn.detach().to(torch.float32)
+            if attn.dim() < 2:
+                attn = attn.reshape(1, -1)
+            p = attn.reshape(-1, attn.shape[-1])
+            if p.shape[-1] > 0:
+                row_sum = p.sum(dim=-1, keepdim=True)
+                looks_like_prob = (
+                    bool(torch.isfinite(p).all().item())
+                    and float(p.min().item()) >= -eps
+                    and bool(torch.allclose(row_sum, torch.ones_like(row_sum), atol=1e-3, rtol=1e-3))
+                )
+                if not looks_like_prob:
+                    p = torch.softmax(p, dim=-1)
+                p = torch.nan_to_num(p, nan=0.0, posinf=0.0, neginf=0.0).clamp_min(eps)
+                p = p / p.sum(dim=-1, keepdim=True).clamp_min(eps)
+                num_regions = p.shape[-1]
+                entropy = -(p * torch.log(p.clamp_min(eps))).sum(dim=-1)
+                if num_regions > 1:
+                    entropy = entropy / math.log(num_regions)
+                else:
+                    entropy = entropy.new_zeros(entropy.shape)
+                stats["region_attn_entropy"].append(float(entropy.mean().item()))
+                stats["region_attn_max"].append(float(p.max(dim=-1).values.mean().item()))
+
+            if tokens.dim() == 4 and tokens.shape[-2] > 1:
+                region_norm = F.normalize(tokens, dim=-1, eps=eps)
+                sim = torch.matmul(region_norm, region_norm.transpose(-1, -2))
+                num_regions = sim.shape[-1]
+                offdiag_mask = ~torch.eye(num_regions, dtype=torch.bool, device=sim.device)
+                offdiag_sim = sim[..., offdiag_mask]
+                stats["region_token_offdiag_cos"].append(
+                    float(torch.nan_to_num(offdiag_sim, nan=0.0, posinf=0.0, neginf=0.0).mean().item())
+                )
 
     def _append_topo_token_debug_stats(
         self,
@@ -341,7 +484,8 @@ class ET(nn.Module):
         # frames_pad_emb = self.vis_feat(im_feature.view(-1, 650,7,7)).view(*im_feature.shape[:2], -1)
 
         # embed frames and direiction:
-        # im_feature: [B, T, 512, 49]
+        # im_feature: [B, T, 512, N] for adapters; the legacy attention path below
+        # still summarizes each frame to a [B, T, 49] feature for fc2.
         # original_att_frame_feature: [B, T, 49]
         # original_emb_frames: [B, T, 768], the unchanged HETT visual frame path.
         im_feature = inputs["frames"]
@@ -355,6 +499,28 @@ class ET(nn.Module):
 
         original_emb_frames = self.fc2(original_att_frame_feature.view(-1, 49)).view(*im_feature.shape[:2], -1)
         emb_frames = original_emb_frames
+        compression_stats = defaultdict(list)
+        stop_visual_context = None
+        region_context = None
+
+        use_stop_contrast = bool(getattr(self.args, "use_stop_contrast", False))
+        stop_contrast_source = getattr(self.args, "stop_contrast_visual_source", "none")
+        stop_contrast_needs_visual_context = (
+            use_stop_contrast
+            and stop_contrast_source in ("global_attn", "fixed_partition")
+        )
+        use_stop_visual_context = bool(getattr(self.args, "use_stop_visual_context", False))
+        if (
+            self.stop_visual_context_adapter is not None
+            and (use_stop_visual_context or stop_contrast_needs_visual_context)
+        ):
+            stop_visual_context, stop_visual_context_diagnostics = self.stop_visual_context_adapter(
+                im_feature,
+                inputs["lang_cls"],
+            )
+            for key, value in stop_visual_context_diagnostics.items():
+                if isinstance(value, (int, float)) and math.isfinite(float(value)):
+                    compression_stats[key].append(float(value))
 
         use_region_prompt = (
             bool(getattr(self.args, "use_region_prompt", False))
@@ -362,6 +528,10 @@ class ET(nn.Module):
             and self.region_prompt_adapter is not None
         )
         if use_region_prompt:
+            use_region_attn_diversity = (
+                self.training
+                and bool(getattr(self.args, "use_region_attn_diversity", False))
+            )
             region_tokens_all = torch.zeros(
                 (
                     im_feature.shape[0],
@@ -371,20 +541,122 @@ class ET(nn.Module):
                 ),
                 device=im_feature.device,
             )
+            visual_token_offdiag_values = []
+            raw_visual_token_offdiag_values = []
+            region_input_values = defaultdict(list)
+            region_gen_attn_values = defaultdict(list)
+            projected_query_values = defaultdict(list)
+            query_spatial_affinity_values = defaultdict(list)
+            region_attn_diversity_losses = []
             for i in range(im_feature.shape[1]):
-                region_tokens = self.region_prompt_adapter(im_feature[:, i, :, :], inputs["lang_cls"])
+                region_tokens = self.region_prompt_adapter(
+                    im_feature[:, i, :, :],
+                    inputs["lang_cls"],
+                    compute_attention_diversity=use_region_attn_diversity,
+                    attention_diversity_mode=getattr(
+                        self.args,
+                        "region_attn_diversity_mode",
+                        "cosine_square",
+                    ),
+                )
                 region_tokens_all = torch.concat((region_tokens_all, region_tokens.unsqueeze(1)), axis=1)
+                if use_region_attn_diversity:
+                    region_attn_diversity_loss = getattr(
+                        self.region_prompt_adapter,
+                        "latest_region_attn_diversity_loss",
+                        None,
+                    )
+                    if region_attn_diversity_loss is not None:
+                        region_attn_diversity_losses.append(region_attn_diversity_loss)
+                visual_token_offdiag_cos = getattr(
+                    self.region_prompt_adapter,
+                    "latest_visual_token_offdiag_cos",
+                    None,
+                )
+                raw_visual_token_offdiag_cos = getattr(
+                    self.region_prompt_adapter,
+                    "latest_raw_visual_token_offdiag_cos",
+                    None,
+                )
+                if visual_token_offdiag_cos is not None and math.isfinite(visual_token_offdiag_cos):
+                    visual_token_offdiag_values.append(visual_token_offdiag_cos)
+                if raw_visual_token_offdiag_cos is not None and math.isfinite(raw_visual_token_offdiag_cos):
+                    raw_visual_token_offdiag_values.append(raw_visual_token_offdiag_cos)
+                for key, value in getattr(
+                    self.region_prompt_adapter,
+                    "latest_input_diagnostics",
+                    {},
+                ).items():
+                    if value is not None and math.isfinite(value):
+                        region_input_values[key].append(value)
+                for key, value in getattr(
+                    self.region_prompt_adapter,
+                    "latest_generation_attention_diagnostics",
+                    {},
+                ).items():
+                    if value is not None and math.isfinite(value):
+                        region_gen_attn_values[key].append(value)
+                for key, value in getattr(
+                    self.region_prompt_adapter,
+                    "latest_projected_query_diagnostics",
+                    {},
+                ).items():
+                    if value is not None and math.isfinite(value):
+                        projected_query_values[key].append(value)
+                for key, value in getattr(
+                    self.region_prompt_adapter,
+                    "latest_query_spatial_affinity_diagnostics",
+                    {},
+                ).items():
+                    if value is not None and math.isfinite(value):
+                        query_spatial_affinity_values[key].append(value)
+
+            if visual_token_offdiag_values:
+                compression_stats["visual_token_offdiag_cos"].append(
+                    sum(visual_token_offdiag_values) / len(visual_token_offdiag_values)
+                )
+            if raw_visual_token_offdiag_values:
+                compression_stats["raw_visual_token_offdiag_cos"].append(
+                    sum(raw_visual_token_offdiag_values) / len(raw_visual_token_offdiag_values)
+                )
+            for key, values in region_input_values.items():
+                if values:
+                    compression_stats[key].append(sum(values) / len(values))
+            for key, values in region_gen_attn_values.items():
+                if values:
+                    compression_stats[key].append(sum(values) / len(values))
+            for key, values in projected_query_values.items():
+                if values:
+                    compression_stats[key].append(sum(values) / len(values))
+            for key, values in query_spatial_affinity_values.items():
+                if values:
+                    compression_stats[key].append(sum(values) / len(values))
+            if use_region_attn_diversity:
+                if region_attn_diversity_losses:
+                    compression_stats["region_attn_diversity_loss"].append(
+                        torch.stack([loss.reshape(()) for loss in region_attn_diversity_losses]).mean()
+                    )
+                else:
+                    compression_stats["region_attn_diversity_loss"].append(im_feature.sum() * 0.0)
 
             region_context, region_attn = self.region_prompt_adapter.select_region_context(
                 region_tokens_all,
                 inputs["lang_cls"],
             )
+            region_context_scaled = self._scale_region_context(region_context, original_emb_frames)
             if self.args.region_prompt_mode == "replace":
-                emb_frames = region_context
+                emb_frames = region_context_scaled
             elif self.args.region_prompt_mode == "residual":
-                emb_frames = original_emb_frames + self.args.region_prompt_alpha * region_context
+                emb_frames = original_emb_frames + self.args.region_prompt_alpha * region_context_scaled
             else:
                 emb_frames = original_emb_frames
+            self._append_region_prompt_diagnostics(
+                compression_stats,
+                original_emb_frames,
+                region_tokens_all,
+                region_context_scaled,
+                region_attn,
+            )
 
         emb_maps = self.fc_map(map_feat).view(im_feature.shape[0], -1, 768)
         # print('sss', emb_frames.shape, emb_maps.shape)
@@ -392,6 +664,20 @@ class ET(nn.Module):
 
         emb_directions = self.direction_embedding(inputs["directions"].view(-1, 4)).view(im_feature.shape[0], -1,
                                                                                          768)  # (batch, embedding_size)
+        stop_contrast_score = None
+        if self.training and use_stop_contrast and self.stop_contrast_loss is not None:
+            stop_contrast_visual_context = None
+            if stop_contrast_source in ("global_attn", "fixed_partition"):
+                stop_contrast_visual_context = stop_visual_context
+            elif stop_contrast_source == "region_prompt":
+                stop_contrast_visual_context = region_context
+            action_hidden = emb_frames + emb_directions
+            stop_contrast_score = self.stop_contrast_loss.score(
+                action_hidden=action_hidden,
+                instruction=emb_lang[:, 0, :],
+                visual_context=stop_contrast_visual_context,
+                detach_visual=bool(getattr(self.args, "stop_contrast_detach_visual", False)),
+            )
         batch_size = emb_lang.shape[0]
 
         text_fts = self.text_proj(emb_lang).permute(0, 2, 1)
@@ -410,7 +696,6 @@ class ET(nn.Module):
         candidate_token_features = []
         candidate_token_positions = []
         cell_to_token_maps = []
-        compression_stats = defaultdict(list)
         base_positions = inputs['candidates'].to(emb_lang.device).to(torch.float32)
         grid_cell_count = self.args.grid_size ** 2
         positive_decay_rate = F.softplus(self.decay_rate) if self.use_time_decay else None
@@ -797,10 +1082,29 @@ class ET(nn.Module):
                 print(f"\n---> [Monitor] Forward Steps: {self.print_counter}, Learned Decay Rate: {current_decay_val:.6f} <---")
         # =============================================================
 
-        mean_stats = {
-            key: float(sum(values) / max(len(values), 1))
-            for key, values in compression_stats.items()
-        }
+        mean_stats = {}
+        for key, values in compression_stats.items():
+            if not values:
+                continue
+            if any(torch.is_tensor(value) for value in values):
+                tensor_values = [
+                    value.reshape(()) if torch.is_tensor(value) else im_feature.new_tensor(float(value))
+                    for value in values
+                ]
+                mean_stats[key] = torch.stack(tensor_values).mean()
+            else:
+                mean_stats[key] = float(sum(values) / max(len(values), 1))
+        if stop_visual_context is not None:
+            mean_stats["stop_visual_context"] = stop_visual_context
+            mean_stats["stop_visual_context_mode"] = getattr(
+                self.args,
+                "stop_visual_context_mode",
+                "global_attn",
+            )
+        if region_context is not None:
+            mean_stats["region_context"] = region_context
+        if stop_contrast_score is not None:
+            mean_stats["stop_contrast_score"] = stop_contrast_score
         if self.use_topo_memory and topo_outputs is not None:
             mean_stats['valid_topo_nodes'] = float((~spatial_padding_mask).sum(dim=1).to(torch.float32).mean().item())
             mean_stats['max_cell_to_token'] = float(cell_to_token_map.max().item()) if cell_to_token_map.numel() > 0 else -1.0

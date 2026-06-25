@@ -54,6 +54,351 @@ def format_compression_logs(logs):
     return "compression " + " ".join(f"{key} {value:.4f}" for key, value in values)
 
 
+def format_region_prompt_logs(logs):
+    keys = [
+        'region_context_norm',
+        'original_emb_norm',
+        'region_residual_ratio',
+        'region_attn_entropy',
+        'region_attn_max',
+        'region_prompt_input_tokens',
+        'region_prompt_input_grid_size',
+        'region_prompt_max_spatial_tokens',
+        'region_query_norm',
+        'region_query_offdiag_cos',
+        'spatial_pos_embed_norm',
+        'spatial_pos_embed_offdiag_cos',
+        'projected_query_norm',
+        'projected_query_offdiag_cos',
+        'query_spatial_affinity_target',
+        'query_spatial_affinity_mean',
+        'query_spatial_affinity_gap',
+        'query_spatial_affinity_max',
+        'region_attn_diversity_loss',
+        'region_gen_attn_entropy',
+        'region_gen_attn_max',
+        'region_gen_attn_effective_num',
+        'region_gen_attn_topk_mass',
+        'region_gen_attn_peak_margin',
+        'region_gen_attn_offdiag_cos',
+        'region_token_offdiag_cos',
+        'visual_token_offdiag_cos',
+        'raw_visual_token_offdiag_cos',
+    ]
+    if not any(logs.get(key, []) for key in keys):
+        return None
+    values = []
+    for key in keys:
+        logged_values = []
+        for value in logs.get(key, []):
+            try:
+                value = float(value)
+            except (TypeError, ValueError):
+                continue
+            if np.isfinite(value):
+                logged_values.append(value)
+        if logged_values:
+            values.append((key, sum(logged_values) / max(len(logged_values), 1)))
+    if not values:
+        return None
+    count_keys = {
+        'region_prompt_input_tokens',
+        'region_prompt_input_grid_size',
+        'region_prompt_max_spatial_tokens',
+    }
+    return "region_prompt " + " ".join(
+        f"{key} {value:.0f}" if key in count_keys else f"{key} {value:.4f}"
+        for key, value in values
+    )
+
+
+def write_region_prompt_logs(args, logs, record_file):
+    if not (
+        bool(getattr(args, 'use_region_prompt', False))
+        and getattr(args, 'region_prompt_mode', 'residual') in ('residual', 'replace')
+    ):
+        return
+    log_line = format_region_prompt_logs(logs)
+    if log_line is not None:
+        write_to_record_file("\n%s" % log_line, record_file)
+
+
+def format_stop_visual_context_logs(args, logs):
+    if not bool(getattr(args, 'use_stop_visual_context', False)):
+        return None
+
+    mode = getattr(args, 'stop_visual_context_mode', 'global_attn')
+    if mode == 'global_attn':
+        keys = [
+            'stop_visual_context_input_tokens',
+            'stop_visual_context_input_grid_size',
+            'stop_visual_context_norm',
+            'global_attn_entropy',
+            'global_attn_max',
+            'global_attn_effective_num',
+            'global_attn_topk_mass',
+            'global_attn_peak_margin',
+        ]
+    elif mode == 'fixed_partition':
+        keys = [
+            'stop_visual_context_input_tokens',
+            'stop_visual_context_input_grid_size',
+            'stop_visual_context_norm',
+            'fixed_region_token_offdiag_cos',
+            'fixed_region_select_entropy',
+            'fixed_region_select_max',
+            'fixed_region_select_effective_num',
+            'fixed_region_select_topk_mass',
+            'fixed_region_select_peak_margin',
+            'fixed_partition_region_size_min',
+            'fixed_partition_region_size_max',
+            'fixed_partition_region_size_mean',
+        ]
+    else:
+        return None
+
+    values = []
+    for key in keys:
+        logged_values = []
+        for value in logs.get(key, []):
+            try:
+                value = float(value)
+            except (TypeError, ValueError):
+                continue
+            if np.isfinite(value):
+                logged_values.append(value)
+        if logged_values:
+            values.append((key, sum(logged_values) / max(len(logged_values), 1)))
+    if not values:
+        return None
+    return "stop_visual_context mode {} ".format(mode) + " ".join(
+        f"{key} {value:.0f}" if key in ('stop_visual_context_input_tokens', 'stop_visual_context_input_grid_size')
+        else f"{key} {value:.4f}" for key, value in values
+    )
+
+
+def write_stop_visual_context_logs(args, logs, record_file):
+    log_line = format_stop_visual_context_logs(args, logs)
+    if log_line is not None:
+        write_to_record_file("\n%s" % log_line, record_file)
+
+
+def format_stop_contrast_logs(args, logs):
+    if not bool(getattr(args, 'use_stop_contrast', False)):
+        return None
+
+    def finite_values(key):
+        values = []
+        for value in logs.get(key, []):
+            try:
+                value = float(value)
+            except (TypeError, ValueError):
+                continue
+            if np.isfinite(value):
+                values.append(value)
+        return values
+
+    def sum_first_available(*keys):
+        for key in keys:
+            values = finite_values(key)
+            if values:
+                return sum(values), key
+        return 0.0, keys[0]
+
+    def aggregate_skip_reason(num_valid, num_pos, num_neg):
+        if num_valid <= 0:
+            return 'no_valid'
+        if num_pos <= 0:
+            return 'no_pos'
+        if num_neg <= 0:
+            return 'no_neg'
+        return 'none'
+
+    local_num_valid, _ = sum_first_available(
+        'stop_contrast_local_num_valid',
+        'stop_contrast_num_valid',
+    )
+    local_num_pos, _ = sum_first_available(
+        'stop_contrast_local_num_pos',
+        'stop_contrast_num_pos',
+    )
+    local_num_neg, _ = sum_first_available(
+        'stop_contrast_local_num_neg',
+        'stop_contrast_num_neg',
+    )
+    global_num_valid, _ = sum_first_available(
+        'stop_contrast_global_num_valid',
+        'stop_contrast_local_num_valid',
+        'stop_contrast_num_valid',
+    )
+    global_num_pos, _ = sum_first_available(
+        'stop_contrast_global_num_pos',
+        'stop_contrast_local_num_pos',
+        'stop_contrast_num_pos',
+    )
+    global_num_neg, _ = sum_first_available(
+        'stop_contrast_global_num_neg',
+        'stop_contrast_local_num_neg',
+        'stop_contrast_num_neg',
+    )
+
+    values = []
+    if local_num_valid > 0 or local_num_pos > 0 or local_num_neg > 0:
+        values.extend([
+            ('stop_contrast_num_valid', local_num_valid),
+            ('stop_contrast_num_pos', local_num_pos),
+            ('stop_contrast_num_neg', local_num_neg),
+            ('stop_contrast_pos_ratio', local_num_pos / max(local_num_valid, 1.0)),
+            ('stop_contrast_local_num_valid', local_num_valid),
+            ('stop_contrast_local_num_pos', local_num_pos),
+            ('stop_contrast_local_num_neg', local_num_neg),
+        ])
+    if global_num_valid > 0 or global_num_pos > 0 or global_num_neg > 0:
+        values.extend([
+            ('stop_contrast_global_num_valid', global_num_valid),
+            ('stop_contrast_global_num_pos', global_num_pos),
+            ('stop_contrast_global_num_neg', global_num_neg),
+            ('stop_contrast_global_pos_ratio', global_num_pos / max(global_num_valid, 1.0)),
+        ])
+
+    conversion_count_keys = [
+        'stop_contrast_num_strict_pos',
+        'stop_contrast_num_hard_neg',
+        'stop_contrast_num_easy_neg',
+        'stop_contrast_num_ambiguous',
+        'stop_contrast_num_ignored',
+        'stop_contrast_global_num_hard_neg',
+        'stop_contrast_global_num_easy_neg',
+        'stop_contrast_global_num_ambiguous',
+        'stop_contrast_global_num_ignored',
+    ]
+    for key in conversion_count_keys:
+        count_value, _ = sum_first_available(key)
+        if count_value > 0 or finite_values(key):
+            values.append((key, count_value))
+
+    scalar_mean_keys = [
+        'stop_contrast_loss',
+        'stop_contrast_temperature',
+        'stop_contrast_lambda',
+        'stop_contrast_positive_mode_id',
+        'stop_contrast_strict_pos_threshold',
+        'stop_contrast_hard_neg_min',
+        'stop_contrast_easy_neg_max',
+        'stop_contrast_use_easy_negatives',
+        'stop_contrast_conversion_pos_ratio',
+        'stop_contrast_conversion_neg_ratio',
+        'stop_contrast_score_easy_neg_mean',
+    ]
+    for key in scalar_mean_keys:
+        logged_values = finite_values(key)
+        if logged_values:
+            values.append((key, sum(logged_values) / max(len(logged_values), 1)))
+
+    local_skip_reason = aggregate_skip_reason(local_num_valid, local_num_pos, local_num_neg)
+    local_skipped = 1.0 if local_skip_reason != 'none' else 0.0
+    skipped_values = finite_values('stop_contrast_local_skipped') or finite_values('stop_contrast_skipped')
+    if skipped_values or local_num_valid > 0:
+        values.append(('stop_contrast_skipped', local_skipped))
+        values.append(('stop_contrast_local_skipped', local_skipped))
+    any_rank_values = finite_values('stop_contrast_any_rank_skipped') or skipped_values
+    if any_rank_values:
+        any_rank_skipped = 1.0 if any(value > 0.0 for value in any_rank_values) else 0.0
+        values.append(('stop_contrast_any_rank_skipped', any_rank_skipped))
+
+    pos_mean = 0.0
+    neg_mean = 0.0
+    pos_weights = finite_values('stop_contrast_local_num_pos') or finite_values('stop_contrast_num_pos')
+    neg_weights = finite_values('stop_contrast_local_num_neg') or finite_values('stop_contrast_num_neg')
+    pos_values = finite_values('stop_contrast_score_pos_mean')
+    neg_values = finite_values('stop_contrast_score_neg_mean')
+    if local_num_pos > 0 and pos_values:
+        weighted = [
+            value * weight
+            for value, weight in zip(pos_values, pos_weights)
+            if weight > 0
+        ]
+        pos_mean = sum(weighted) / max(sum(weight for weight in pos_weights if weight > 0), 1.0)
+    if local_num_neg > 0 and neg_values:
+        weighted = [
+            value * weight
+            for value, weight in zip(neg_values, neg_weights)
+            if weight > 0
+        ]
+        neg_mean = sum(weighted) / max(sum(weight for weight in neg_weights if weight > 0), 1.0)
+    if pos_values:
+        values.append(('stop_contrast_score_pos_mean', pos_mean if local_num_pos > 0 else 0.0))
+    if neg_values:
+        values.append(('stop_contrast_score_neg_mean', neg_mean if local_num_neg > 0 else 0.0))
+    if pos_values or neg_values:
+        score_gap = pos_mean - neg_mean if local_num_pos > 0 and local_num_neg > 0 else 0.0
+        values.append(('stop_contrast_score_gap', score_gap))
+
+    hard_neg_values = finite_values('stop_contrast_score_hard_neg_mean')
+    hard_neg_weights = finite_values('stop_contrast_num_hard_neg')
+    local_num_hard_neg = sum(hard_neg_weights) if hard_neg_weights else 0.0
+    hard_neg_mean = 0.0
+    if local_num_hard_neg > 0 and hard_neg_values:
+        weighted = [
+            value * weight
+            for value, weight in zip(hard_neg_values, hard_neg_weights)
+            if weight > 0
+        ]
+        hard_neg_mean = sum(weighted) / max(sum(weight for weight in hard_neg_weights if weight > 0), 1.0)
+    if hard_neg_values:
+        values.append(('stop_contrast_score_hard_neg_mean', hard_neg_mean if local_num_hard_neg > 0 else 0.0))
+        values.append((
+            'stop_contrast_score_gap_pos_hard_neg',
+            pos_mean - hard_neg_mean if local_num_pos > 0 and local_num_hard_neg > 0 else 0.0,
+        ))
+
+    if not values:
+        return None
+    source = getattr(args, 'stop_contrast_visual_source', 'none')
+    local_reason = local_skip_reason
+    global_reason = aggregate_skip_reason(global_num_valid, global_num_pos, global_num_neg)
+    log_line = "stop_contrast visual_source {} ".format(source) + " ".join(
+        f"{key} {value:.0f}" if key in (
+            'stop_contrast_num_valid',
+            'stop_contrast_num_pos',
+            'stop_contrast_num_neg',
+            'stop_contrast_skipped',
+            'stop_contrast_local_num_valid',
+            'stop_contrast_local_num_pos',
+            'stop_contrast_local_num_neg',
+            'stop_contrast_local_skipped',
+            'stop_contrast_any_rank_skipped',
+            'stop_contrast_global_num_valid',
+            'stop_contrast_global_num_pos',
+            'stop_contrast_global_num_neg',
+            'stop_contrast_positive_mode_id',
+            'stop_contrast_use_easy_negatives',
+            'stop_contrast_num_strict_pos',
+            'stop_contrast_num_hard_neg',
+            'stop_contrast_num_easy_neg',
+            'stop_contrast_num_ambiguous',
+            'stop_contrast_num_ignored',
+            'stop_contrast_global_num_hard_neg',
+            'stop_contrast_global_num_easy_neg',
+            'stop_contrast_global_num_ambiguous',
+            'stop_contrast_global_num_ignored',
+        )
+        else f"{key} {value:.4f}" for key, value in values
+    )
+    if local_reason != 'none':
+        log_line += f" stop_contrast_skip_reason {local_reason}"
+        log_line += f" stop_contrast_local_skip_reason {local_reason}"
+    if global_reason != 'none':
+        log_line += f" stop_contrast_global_skip_reason {global_reason}"
+    return log_line
+
+
+def write_stop_contrast_logs(args, logs, record_file):
+    log_line = format_stop_contrast_logs(args, logs)
+    if log_line is not None:
+        write_to_record_file("\n%s" % log_line, record_file)
+
+
 def _mean_log_value(logs, key, default=0.0):
     values = []
     for value in logs.get(key, []):
@@ -383,6 +728,9 @@ def train(args, train_env, val_envs, rank=-1):
                 record_file
             )
             write_to_record_file("\n%s" % format_compression_logs(agent.logs), record_file)
+            write_region_prompt_logs(args, agent.logs, record_file)
+            write_stop_visual_context_logs(args, agent.logs, record_file)
+            write_stop_contrast_logs(args, agent.logs, record_file)
             if args.use_topo_memory:
                 write_to_record_file("\n%s" % format_topo_logs(agent.logs), record_file)
 
@@ -417,6 +765,9 @@ def train(args, train_env, val_envs, rank=-1):
                         record_file
                     )
                     write_to_record_file("\n%s" % format_compression_logs(agent_eval.logs), record_file)
+                    write_region_prompt_logs(args, agent_eval.logs, record_file)
+                    write_stop_visual_context_logs(args, agent_eval.logs, record_file)
+                    write_stop_contrast_logs(args, agent_eval.logs, record_file)
                     if args.use_topo_memory:
                         write_to_record_file("\n%s" % format_topo_logs(agent_eval.logs), record_file)
                     loss_str += "\n%s " % env_name
@@ -476,6 +827,9 @@ def valid(args, val_envs, rank=-1):
                 record_file
             )
             write_to_record_file("\n%s" % format_compression_logs(agent_eval.logs), record_file)
+            write_region_prompt_logs(args, agent_eval.logs, record_file)
+            write_stop_visual_context_logs(args, agent_eval.logs, record_file)
+            write_stop_contrast_logs(args, agent_eval.logs, record_file)
             if args.use_topo_memory:
                 write_to_record_file("\n%s" % format_topo_logs(agent_eval.logs), record_file)
             loss_str += "\n%s " % env_name

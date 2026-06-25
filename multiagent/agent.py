@@ -442,6 +442,7 @@ class NavCMTAgent:
             traj[i]['gt_trajectory'] = ob['trajectory']
             traj[i]['trajectory'] = [poses[i]]
             traj[i]['stage1_trajectory'] = [poses[i]]
+            traj[i]['end_reason'] = 'unknown'
         # print(np.array([len(ob['trajectory']) for ob in obs]))
 
         # Initialization the finishing status
@@ -453,6 +454,28 @@ class NavCMTAgent:
         progress_loss = 0.
         goal_predict_loss = 0.
         target_predict_loss = 0.
+        use_region_prompt = (
+            bool(getattr(self.args, 'use_region_prompt', False))
+            and getattr(self.args, 'region_prompt_mode', 'residual') in ('residual', 'replace')
+        )
+        use_stop_contrast = bool(getattr(self.args, 'use_stop_contrast', False))
+        use_stop_visual_context = bool(getattr(self.args, 'use_stop_visual_context', False))
+        use_region_attn_diversity = (
+            use_region_prompt
+            and bool(getattr(self.args, 'use_region_attn_diversity', False))
+        )
+        optional_rollout_features_enabled = (
+            use_region_prompt
+            or use_stop_contrast
+            or use_stop_visual_context
+            or use_region_attn_diversity
+        )
+        region_attn_diversity_loss = (
+            torch.tensor(0., device=lang_features.device)
+            if use_region_attn_diversity
+            else None
+        )
+        region_attn_diversity_steps = 0
 
         stage1_step = 0
         stage2_step = 0
@@ -589,6 +612,20 @@ class NavCMTAgent:
             for key, value in compression_stats.items():
                 if self.args.enable_topo_memory and key in update_only_topo_stat_keys:
                     continue
+                if optional_rollout_features_enabled:
+                    if key in ('stop_visual_context', 'region_context', 'stop_contrast_score'):
+                        continue
+                    if key == 'region_attn_diversity_loss':
+                        if (
+                            train_ml is not None
+                            and use_region_attn_diversity
+                            and torch.is_tensor(value)
+                        ):
+                            region_attn_diversity_loss = region_attn_diversity_loss + value
+                            region_attn_diversity_steps += 1
+                        continue
+                    if torch.is_tensor(value):
+                        value = float(value.detach().item())
                 self.logs[key].append(value)
 
             if (
@@ -702,6 +739,20 @@ class NavCMTAgent:
             gt_goal = torch.from_numpy(np.array([ob['normalized_goal'] for ob in obs], dtype=np.float32))
             gt_progress = torch.from_numpy(np.array([ob['progress'] for ob in obs], dtype=np.float32))
             gt_target = torch.from_numpy(np.array([ob['grid_goal'] for ob in obs], dtype=np.int64))
+            if (
+                train_ml is not None
+                and use_stop_contrast
+                and 'stop_contrast_score' in compression_stats
+            ):
+                if not hasattr(self, '_stop_contrast_scores'):
+                    self._stop_contrast_scores = []
+                    self._stop_contrast_progress = []
+                    self._stop_contrast_valid = []
+                self._stop_contrast_scores.append(compression_stats['stop_contrast_score'])
+                self._stop_contrast_progress.append(gt_progress.view(batch_size, 1).cuda())
+                self._stop_contrast_valid.append(
+                    torch.from_numpy((~ended).astype(np.bool_)).view(batch_size, 1).cuda()
+                )
             # there is no ground truth in unseen_test set
             if not 'test' in self.env_name:
                 # Get ground truth
@@ -862,6 +913,14 @@ class NavCMTAgent:
             # Early exit if all ended
             if ended.all():
                 break
+        for i in range(batch_size):
+            if traj[i].get('end_reason', 'unknown') == 'unknown':
+                if len(traj[i]['trajectory']) >= self.args.max_action_len + 1:
+                    traj[i]['end_reason'] = 'max_len'
+                elif ended[i]:
+                    traj[i]['end_reason'] = 'other'
+                else:
+                    traj[i]['end_reason'] = 'max_len'
         # print(visualize)
         if visualize:
             for i, ob in enumerate(obs):
@@ -887,16 +946,108 @@ class NavCMTAgent:
             # print(ml_loss)
             # ml_loss = direction_loss + progress_loss
             ml_loss = 1 * direction_loss + 0.1 * progress_loss + 2 * goal_predict_loss + 0.1 * target_predict_loss
+            if use_region_attn_diversity:
+                if region_attn_diversity_steps > 0:
+                    region_attn_diversity_loss = region_attn_diversity_loss / region_attn_diversity_steps
+                else:
+                    region_attn_diversity_loss = direction_loss * 0.0
+                ml_loss = ml_loss + (
+                    float(getattr(self.args, 'region_attn_diversity_lambda', 0.01))
+                    * region_attn_diversity_loss
+                    * batch_size
+                )
+            if use_stop_contrast:
+                stop_contrast_scores = getattr(self, '_stop_contrast_scores', [])
+                stop_contrast_loss_module = getattr(self.vln_model_without_ddp, 'stop_contrast_loss', None)
+                if stop_contrast_scores and stop_contrast_loss_module is not None:
+                    stop_contrast_scores = torch.cat(stop_contrast_scores, dim=1)
+                    stop_contrast_progress = torch.cat(self._stop_contrast_progress, dim=1)
+                    stop_contrast_valid = torch.cat(self._stop_contrast_valid, dim=1)
+                    stop_contrast_loss, stop_contrast_diagnostics = (
+                        stop_contrast_loss_module.compute_loss_from_scores(
+                            scores=stop_contrast_scores,
+                            progress_target=stop_contrast_progress,
+                            valid_mask=stop_contrast_valid,
+                            progress_threshold=getattr(
+                                self.args,
+                                'stop_contrast_progress_threshold',
+                                0.8,
+                            ),
+                            positive_mode=getattr(
+                                self.args,
+                                'stop_contrast_positive_mode',
+                                'progress_threshold',
+                            ),
+                            strict_pos_threshold=getattr(
+                                self.args,
+                                'stop_contrast_strict_pos_threshold',
+                                0.95,
+                            ),
+                            hard_neg_min=getattr(
+                                self.args,
+                                'stop_contrast_hard_neg_min',
+                                0.80,
+                            ),
+                            easy_neg_max=getattr(
+                                self.args,
+                                'stop_contrast_easy_neg_max',
+                                0.50,
+                            ),
+                            use_easy_negatives=getattr(
+                                self.args,
+                                'stop_contrast_use_easy_negatives',
+                                False,
+                            ),
+                            ignore_ambiguous=getattr(
+                                self.args,
+                                'stop_contrast_ignore_ambiguous',
+                                True,
+                            ),
+                        )
+                    )
+                else:
+                    stop_contrast_loss = direction_loss * 0.0
+                    stop_contrast_diagnostics = {}
+                ml_loss = ml_loss + (
+                    float(getattr(self.args, 'stop_contrast_lambda', 0.05))
+                    * stop_contrast_loss
+                    * batch_size
+                )
+                for key, value in stop_contrast_diagnostics.items():
+                    if key in (
+                        'stop_contrast_visual_source',
+                        'stop_contrast_skip_reason',
+                        'stop_contrast_local_skip_reason',
+                        'stop_contrast_global_skip_reason',
+                    ):
+                        self.logs[key].append(value)
+                        continue
+                    self.logs[key].append(float(value))
+                self.logs['stop_contrast_lambda'].append(
+                    float(getattr(self.args, 'stop_contrast_lambda', 0.05))
+                )
+                if stop_contrast_loss_module is not None:
+                    self.logs['stop_contrast_temperature'].append(
+                        float(getattr(stop_contrast_loss_module, 'temperature', 0.07))
+                    )
             # ml_loss = progress_loss + goal_predict_loss
             self.loss += ml_loss * train_ml / batch_size
 
             # self.logs['ml_loss'].append((ml_loss * train_ml / batch_size).item())
 
+            if use_region_attn_diversity:
+                self.logs['region_attn_diversity_loss'].append(
+                    float(region_attn_diversity_loss.detach().item())
+                )
             self.logs['direction_loss'].append((direction_loss * train_ml / batch_size).item())
             self.logs['progress_loss'].append((progress_loss * train_ml / batch_size).item())
             self.logs['goal_predict_loss'].append((goal_predict_loss * train_ml / batch_size).item())
             self.logs['target_predict_loss'].append((target_predict_loss * train_ml / batch_size).item())
             self.logs['IL_loss'].append((ml_loss * train_ml / batch_size).item())
+            if hasattr(self, '_stop_contrast_scores'):
+                del self._stop_contrast_scores
+                del self._stop_contrast_progress
+                del self._stop_contrast_valid
 
         if type(self.loss) is int:  # For safety, it will be activated if no losses are added
             self.losses.append(0.)

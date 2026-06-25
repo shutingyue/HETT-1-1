@@ -222,3 +222,38 @@ datasets/
 *.tif
 *.tiff
 *.npz
+# datasets and large local assets
+datasets/
+data/
+
+# checkpoints / model weights
+*.pt
+*.pth
+*.ckpt
+*.bin
+*.weights
+checkpoint/
+checkpoints/
+ckpts/
+snap/
+snapshots/
+
+# large raster / arrays
+*.tif
+*.tiff
+*.npz
+
+# logs
+log/train.txt
+multiagent/log/
+*.out
+*.err
+
+# python cache
+__pycache__/
+*.pyc
+*.pyo
+
+# experiment cache
+wandb/
+runs/

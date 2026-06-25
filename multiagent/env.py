@@ -343,10 +343,16 @@ class CityNavBatch(torch.utils.data.IterableDataset):
 
         # scores['iou'] = progress[-1]  # same as compute_iou(corners[-1], gt_corners[-1]）
 
-        scores['ne'] = path[-1].dist_to(goal)
-        scores['oracle_ne'] = np.min(np.array([path[x].dist_to(goal) for x in range(len(path))]))
+        dists = np.array([point.dist_to(goal) for point in path], dtype=np.float32)
+        success_mask = dists <= self.args.success_dist
 
-        scores['success'] = float(path[-1].dist_to(goal) <= self.args.success_dist)
+        scores['ne'] = float(dists[-1])
+        scores['oracle_ne'] = float(np.min(dists))
+        scores['final_ne'] = scores['ne']
+        scores['min_ne'] = scores['oracle_ne']
+        scores['final_minus_min_ne'] = scores['final_ne'] - scores['min_ne']
+
+        scores['success'] = float(success_mask[-1])
 
         # scores['gp_success'] = float()
         # _center = np.mean(gt_corners[-1], axis=0)
@@ -361,8 +367,17 @@ class CityNavBatch(torch.utils.data.IterableDataset):
         # if not _poly.contains(_point):
         #     scores['success'] = float(0)
 
-        scores['oracle_success'] = float(
-            any(np.array([point.dist_to(goal) for point in path]) <= self.args.success_dist))
+        scores['oracle_success'] = float(np.any(success_mask))
+        scores['near_goal_fail'] = float(scores['oracle_success'] > 0.0 and scores['success'] == 0.0)
+        if scores['oracle_success'] > 0.0:
+            first_success_step = int(np.where(success_mask)[0][0])
+            final_step = len(path) - 1
+            scores['first_success_step'] = float(first_success_step)
+            scores['steps_after_first_success'] = float(final_step - first_success_step)
+        else:
+            scores['first_success_step'] = np.nan
+            scores['steps_after_first_success'] = np.nan
+        scores['final_step'] = float(len(path) - 1)
         scores['gt_length'] = gt_net_lengths
         scores['spl'] = scores['success'] * gt_net_lengths / max(scores['trajectory_lengths'], gt_net_lengths, 0.01)
 
@@ -374,6 +389,20 @@ class CityNavBatch(torch.utils.data.IterableDataset):
         # print('eval %d predictions' % (len(preds)))
 
         metrics = defaultdict(list)
+
+        def safe_mean(values, default=0.0):
+            if len(values) == 0:
+                return float(default)
+            return float(np.mean(values))
+
+        def safe_nanmean(values, default=0.0):
+            if len(values) == 0:
+                return float(default)
+            arr = np.array(values, dtype=np.float32)
+            finite = np.isfinite(arr)
+            if not np.any(finite):
+                return float(default)
+            return float(np.mean(arr[finite]))
 
         for k in preds.keys():
             item = preds[k]
@@ -434,6 +463,14 @@ class CityNavBatch(torch.utils.data.IterableDataset):
             traj = [pose.xy for pose in item['stage2_trajectory']]
             if len(traj) == 0:
                 traj = [item['trajectory'][-1].xy]
+            stage2_dists = np.array([point.dist_to(goal) for point in traj], dtype=np.float32)
+            stage2_start_ne = float(stage2_dists[0])
+            stage2_final_ne = float(stage2_dists[-1])
+            stage2_delta_ne = stage2_final_ne - stage2_start_ne
+            metrics['stage2_start_ne'].append(stage2_start_ne)
+            metrics['stage2_final_ne'].append(stage2_final_ne)
+            metrics['stage2_delta_ne'].append(stage2_delta_ne)
+            metrics['stage2_drift'].append(float(stage2_delta_ne > 0.0))
             traj_scores = self._eval_item(gt_trajs, traj, goal)
             for k, v in traj_scores.items():
                 if k == 'trajectory_lengths':
@@ -447,6 +484,13 @@ class CityNavBatch(torch.utils.data.IterableDataset):
                 if k == 'oracle_ne':
                     metrics['stage2_oracle_ne'].append(v)
 
+            end_reason = item.get('end_reason', 'unknown')
+            if end_reason == 'unknown':
+                if len(item['trajectory']) >= getattr(self.args, 'max_action_len', 0) + 1:
+                    end_reason = 'max_len'
+                else:
+                    end_reason = 'other'
+            metrics['end_reason'].append(end_reason)
             metrics['instr_id'].append(instr_id)
 
         gp_success_count = len(metrics['gp_success'])
@@ -471,27 +515,46 @@ class CityNavBatch(torch.utils.data.IterableDataset):
 
         gp_sr = np.mean(metrics['gp_success']) * 100 if gp_success_count > 0 else 0.0
         oracle_gp_sr = np.mean(metrics['oracle_gp_success']) * 100 if oracle_gp_success_count > 0 else 0.0
+        sr = safe_mean(metrics['success']) * 100
+        oracle_sr = safe_mean(metrics['oracle_success']) * 100
+        num_end_reasons = max(len(metrics['end_reason']), 1)
         avg_metrics = {
             # 'steps': np.mean(metrics['trajectory_steps']),
-            'lengths': np.mean(metrics['trajectory_lengths']),
-            'stage1_length': np.mean(metrics['stage1_trajectory_lengths']),
-            'stage2_length': np.mean(metrics['stage2_trajectory_lengths']),
-            'sr': np.mean(metrics['success']) * 100,
-            'sr1': np.mean(metrics['stage1_success']) * 100,
-            'sr2': np.mean(metrics['stage2_success']) * 100,
-            'oracle_sr': np.mean(metrics['oracle_success']) * 100,
-            'oracle_sr1': np.mean(metrics['stage1_oracle_success']) * 100,
-            'oracle_sr2': np.mean(metrics['stage2_oracle_success']) * 100,
-            'spl': np.mean(metrics['spl']) * 100,
-            'ne': np.mean(metrics['ne']),
-            'oracle_ne': np.mean(metrics['oracle_ne']),
-            'stage1_ne': np.mean(metrics['stage1_ne']),
-            'stage1_oracle_ne': np.mean(metrics['stage1_oracle_ne']),
-            'stage2_ne': np.mean(metrics['stage2_ne']),
-            'stage2_oracle_ne': np.mean(metrics['stage2_oracle_ne']),
-            'gt_length': np.mean(metrics['gt_length']),
+            'lengths': safe_mean(metrics['trajectory_lengths']),
+            'stage1_length': safe_mean(metrics['stage1_trajectory_lengths']),
+            'stage2_length': safe_mean(metrics['stage2_trajectory_lengths']),
+            'sr': sr,
+            'sr1': safe_mean(metrics['stage1_success']) * 100,
+            'sr2': safe_mean(metrics['stage2_success']) * 100,
+            'oracle_sr': oracle_sr,
+            'oracle_sr1': safe_mean(metrics['stage1_oracle_success']) * 100,
+            'oracle_sr2': safe_mean(metrics['stage2_oracle_success']) * 100,
+            'spl': safe_mean(metrics['spl']) * 100,
+            'ne': safe_mean(metrics['ne']),
+            'oracle_ne': safe_mean(metrics['oracle_ne']),
+            'stage1_ne': safe_mean(metrics['stage1_ne']),
+            'stage1_oracle_ne': safe_mean(metrics['stage1_oracle_ne']),
+            'stage2_ne': safe_mean(metrics['stage2_ne']),
+            'stage2_oracle_ne': safe_mean(metrics['stage2_oracle_ne']),
+            'gt_length': safe_mean(metrics['gt_length']),
             'gp_sr': gp_sr,
-            'oracle_gp_sr': oracle_gp_sr
+            'oracle_gp_sr': oracle_gp_sr,
+            'conversion_rate': sr / oracle_sr if oracle_sr > 0.0 else 0.0,
+            'oracle_final_gap': oracle_sr - sr,
+            'min_ne': safe_mean(metrics['min_ne']),
+            'final_ne': safe_mean(metrics['final_ne']),
+            'final_minus_min_ne': safe_mean(metrics['final_minus_min_ne']),
+            'near_goal_fail_rate': safe_mean(metrics['near_goal_fail']) * 100,
+            'first_success_step': safe_nanmean(metrics['first_success_step']),
+            'final_step': safe_mean(metrics['final_step']),
+            'steps_after_first_success': safe_nanmean(metrics['steps_after_first_success']),
+            'stage2_start_ne': safe_mean(metrics['stage2_start_ne']),
+            'stage2_final_ne': safe_mean(metrics['stage2_final_ne']),
+            'stage2_delta_ne': safe_mean(metrics['stage2_delta_ne']),
+            'stage2_drift_rate': safe_mean(metrics['stage2_drift']) * 100,
+            'end_max_len_rate': 100.0 * sum(r == 'max_len' for r in metrics['end_reason']) / num_end_reasons,
+            'end_progress_stop_rate': 100.0 * sum(r == 'progress_stop' for r in metrics['end_reason']) / num_end_reasons,
+            'end_other_rate': 100.0 * sum(r == 'other' for r in metrics['end_reason']) / num_end_reasons,
             # 'oracle_goal_sr': np.mean(metrics['oracle_goal_success']),
             # 'goal_sr': np.mean(metrics['goal_success'])
             # 'oracle_pred_sr': np.mean(item['oracle_success']) * 100,
